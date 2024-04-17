@@ -3,6 +3,7 @@ import logging
 import re
 from datetime import datetime as datetime_type
 from datetime import timezone
+import dateutil.parser
 from typing import Any, Dict, List, Optional, Set, Type, Union
 from urllib.parse import unquote_plus, urljoin
 
@@ -26,6 +27,7 @@ from stac_fastapi.core.session import Session
 from stac_fastapi.core.types.core import (
     AsyncBaseCoreClient,
     AsyncBaseFiltersClient,
+    AsyncCollectionSearchClient,
     AsyncBaseTransactionsClient,
 )
 from stac_fastapi.extensions.third_party.bulk_transactions import (
@@ -38,7 +40,7 @@ from stac_fastapi.types.config import Settings
 from stac_fastapi.types.conformance import BASE_CONFORMANCE_CLASSES
 from stac_fastapi.types.extension import ApiExtension
 from stac_fastapi.types.requests import get_base_url
-from stac_fastapi.types.search import BaseSearchPostRequest
+from stac_fastapi.types.search import BaseSearchPostRequest, BaseCollectionSearchPostRequest
 from stac_fastapi.types.stac import Collection, Collections, Item, ItemCollection
 
 logger = logging.getLogger(__name__)
@@ -944,3 +946,233 @@ class EsAsyncBaseFiltersClient(AsyncBaseFiltersClient):
             },
             "additionalProperties": True,
         }
+
+@attr.s
+class EsAsyncCollectionSearchClient(AsyncCollectionSearchClient):
+    """Defines a pattern for implementing the STAC filter extension."""
+
+    database: BaseDatabaseLogic = attr.ib()
+    post_request_model = attr.ib(default=BaseCollectionSearchPostRequest)
+    #item_serializer: Type[ItemSerializer] = attr.ib(default=ItemSerializer)
+    collection_serializer: Type[CollectionSerializer] = attr.ib(
+        default=CollectionSerializer
+    )
+
+    def check_collection_null_datetime(self, hit, datetime_search):
+        
+        ## If no datetime to be searched return all hits
+        if datetime_search == None:
+            return True
+
+        ## Reformat document datetime to align with supported search format: YYYY-MM-DDTHH:MM:SSZ
+
+        collection_start_date = hit['extent']['temporal']['interval'][0][0]
+        collection_end_date = hit['extent']['temporal']['interval'][0][1]
+
+        print(collection_start_date)
+        ## If interval endpoint is None, convert to datetime object, note we need to limit to first 18 digits, to align with search input format, ISO-8601 (YYYY-MM-DDTHH:MM:SSZ)
+        if collection_start_date == None:
+            if collection_end_date == None:
+                return True
+            collection_end_date = dateutil.parser.isoparse(collection_end_date[0:19] + "Z")
+            if "eq" in datetime_search:
+                input_datetime = dateutil.parser.isoparse(datetime_search['eq'])
+                print(collection_end_date)
+                print(input_datetime)
+                if collection_end_date >= input_datetime:
+                    return True
+                return False
+            else:
+                input_datetime_start = dateutil.parser.isoparse(datetime_search['gte'])
+                input_datetime_end = dateutil.parser.isoparse(datetime_search['lte'])
+                if collection_end_date >= input_datetime_start:
+                    return True
+                return False
+
+        return True
+
+        
+    def check_collection_bbox(self, hit, bbox):
+
+        ## If no bbox to be searched return all hits
+        if bbox == None:
+            return True
+
+        input_bbox = bbox
+        
+        collection_bbox = hit['extent']['spatial']['bbox'][0]
+        
+        if len(collection_bbox) == 6:
+                collection_bbox = [collection_bbox[0], collection_bbox[1], collection_bbox[3], collection_bbox[4]]
+
+        bbox_lon_min = collection_bbox[0]
+        bbox_lon_max = collection_bbox[2]
+        bbox_lat_min = collection_bbox[1]
+        bbox_lat_max = collection_bbox[3]
+
+        if (bbox_lon_max >= float(input_bbox[0])  and bbox_lon_min <= float(input_bbox[2]) and bbox_lat_min <= float(input_bbox[3]) and bbox_lat_max >= float(input_bbox[1])):
+            return True
+        
+        return False
+
+    async def post_collection_search(
+        self, search_request: BaseCollectionSearchPostRequest, request: Request, **kwargs
+    ) -> ItemCollection:
+        """
+        Perform a POST search on the catalog.
+
+        Args:
+            search_request (BaseSearchPostRequest): Request object that includes the parameters for the search.
+            kwargs: Keyword arguments passed to the function.
+
+        Returns:
+            ItemCollection: A collection of items matching the search criteria.
+
+        Raises:
+            HTTPException: If there is an error with the cql2_json filter.
+        """
+        base_url = str(request.base_url)
+
+        search = self.database.make_collection_search()
+
+        datetime_search = None
+        bbox = None
+
+        if search_request.datetime:
+            datetime_search = CoreClient._return_date(search_request.datetime)
+            search = self.database.apply_datetime_collections_filter(
+                search=search, datetime_search=datetime_search
+            )
+
+        if search_request.bbox:
+            bbox = search_request.bbox
+            if len(bbox) == 6:
+                bbox = [bbox[0], bbox[1], bbox[3], bbox[4]]
+
+            #search = self.database.apply_bbox_collections_filter(search=search, bbox=bbox)
+
+        sort = None
+
+        limit = 10
+        if search_request.limit:
+            limit = search_request.limit
+
+        base_url = str(request.base_url)
+
+        collections, maybe_count, next_token = await self.database.execute_collection_search(
+            search=search,
+            limit=limit,
+            token=None,
+            sort=sort,
+            collection_ids=None, #search_request.collections,
+            base_url=base_url,
+        )
+
+
+        ## This search will handle collections with ongoing intervals (end with null), but not those that start with null
+        collections = [
+            self.collection_serializer.db_to_stac(collection, base_url=base_url) for collection in collections 
+            if self.check_collection_bbox(collection, bbox)
+        ]
+
+        ## We also need to include collections with NULL startpoints
+
+
+        links = []
+        if next_token:
+            links = await PagingLinks(request=request, next=next_token).get_links()
+
+        return Collections(collections=collections, links=links)
+
+    # todo: use the ES _mapping endpoint to dynamically find what fields exist
+    async def get_collection_search(
+        self,
+        request: Request,
+        bbox: Optional[List[NumType]] = None,
+        #intersects: Optional[str] = None,
+        datetime: Optional[Union[str, datetime_type]] = None,
+        limit: Optional[int] = 10,
+        **kwargs,
+    ) -> stac_types.ItemCollection:
+        """Cross catalog search (GET) for collections.
+
+        Called with `GET /collection-search`.
+
+        Args:
+            search_request: search request parameters.
+
+        Returns:
+            A list of collections matching search criteria.
+        """
+
+        base_args = {
+            "bbox": bbox,
+            "limit": limit,
+        }
+
+        if datetime:
+            base_args["datetime"] = datetime
+
+        # if intersects:
+        #     base_args["intersects"] = orjson.loads(unquote_plus(intersects))
+
+        ## Could add sortBy later
+
+        ## Could add filter later
+
+        ## Could add fields later        
+
+        # Do the request
+        try:
+            search_request = self.post_request_model(**base_args)
+        except ValidationError:
+            raise HTTPException(status_code=400, detail="Invalid parameters provided")
+        resp = await self.post_collection_search(search_request=search_request, request=request)
+
+        return resp
+    
+
+    async def get_collection_search_2(
+        self,
+        request: Request,
+        bbox: Optional[List[NumType]] = None,
+        #intersects: Optional[str] = None,
+        datetime: Optional[Union[str, datetime_type]] = None,
+        limit: Optional[int] = 10,
+        **kwargs,
+    ) -> stac_types.ItemCollection:
+        
+        base_url = str(request.base_url)
+        limit = int(request.query_params.get("limit", 10))
+        token = request.query_params.get("token")
+
+        if datetime:
+            datetime_search = CoreClient._return_date(datetime)
+        else:
+            datetime_search = None
+
+        if bbox:
+            if len(bbox) == 6:
+                bbox = [bbox[0], bbox[1], bbox[3], bbox[4]]
+        else:
+            bbox = None
+
+        collections, next_token = await self.database.execute_collection_search_2(
+            token=token, limit=limit, base_url=base_url, datetime_search=datetime_search, bbox=bbox
+        )
+
+        links = [
+            {"rel": Relations.root.value, "type": MimeTypes.json, "href": base_url},
+            {"rel": Relations.parent.value, "type": MimeTypes.json, "href": base_url},
+            {
+                "rel": Relations.self.value,
+                "type": MimeTypes.json,
+                "href": urljoin(base_url, "collections"),
+            },
+        ]
+
+        if next_token:
+            next_link = PagingLinks(next=next_token, request=request).link_next()
+            links.append(next_link)
+
+        return Collections(collections=collections, links=links)

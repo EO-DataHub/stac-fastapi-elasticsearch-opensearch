@@ -4,6 +4,7 @@ import logging
 import os
 from base64 import urlsafe_b64decode, urlsafe_b64encode
 from typing import Any, Dict, Iterable, List, Optional, Protocol, Tuple, Type, Union
+import dateutil.parser
 
 import attr
 from elasticsearch_dsl import Q, Search
@@ -46,6 +47,11 @@ DEFAULT_SORT = {
     "properties.datetime": {"order": "desc"},
     "id": {"order": "desc"},
     "collection": {"order": "desc"},
+}
+
+DEFAULT_COLLECTIONS_SORT = {
+    "extent.temporal.interval": {"order": "desc"},
+    "id": {"order": "desc"},
 }
 
 ES_ITEMS_SETTINGS = {
@@ -134,7 +140,8 @@ ES_COLLECTIONS_MAPPINGS = {
     "properties": {
         "id": {"type": "keyword"},
         "extent.spatial.bbox": {"type": "long"},
-        "extent.temporal.interval": {"type": "date"},
+        ## Ensure any Collections with 'null' endpoints are treated as if ongoing.
+        "extent.temporal.interval": {"type": "date", "null_value": "2201-12-01T12:31:12Z"},
         "providers": {"type": "object", "enabled": False},
         "links": {"type": "object", "enabled": False},
         "item_assets": {"type": "object", "enabled": False},
@@ -385,6 +392,11 @@ class DatabaseLogic:
     def make_search():
         """Database logic to create a Search instance."""
         return Search().sort(*DEFAULT_SORT)
+    
+    @staticmethod
+    def make_collection_search():
+        """Database logic to create a Search instance."""
+        return Search().sort(*DEFAULT_COLLECTIONS_SORT)
 
     @staticmethod
     def apply_ids_filter(search: Search, item_ids: List[str]):
@@ -419,6 +431,69 @@ class DatabaseLogic:
                 "range", properties__datetime={"gte": datetime_search["gte"]}
             )
         return search
+    
+
+    @staticmethod
+    def get_collections_null_datetime_filter(search: Search):
+        """Identify documents containing null values
+
+        Args:
+            search (Search): The search object to filter.
+
+        Returns:
+            Search: The filtered search object.
+        """
+
+        search = search.filter("term", **{"extent.temporal.interval": "2201-12-01T12:31:12Z"})
+
+        
+        return search
+
+
+    @staticmethod
+    def apply_datetime_collections_filter(search: Search, datetime_search):
+        """Apply a filter to search based on datetime field.
+
+        Args:
+            search (Search): The search object to filter.
+            datetime_search (dict): The datetime filter criteria.
+
+        Returns:
+            Search: The filtered search object.
+        """
+        if "eq" in datetime_search:
+            ## As the first interval in the collection defines the entire range, this will contain the range extremes
+            search = search.filter("range", **{"extent.temporal.interval": {"lte": datetime_search['eq']}})
+            search = search.filter("range", **{"extent.temporal.interval": {"gte": datetime_search['eq']}})            
+
+        # TODO handle null endpoint at start e.g. [null, 2015-06-27T10:25:31.456000Z], currently 
+        # these will be interpretted as ongoing intervals and will be captured in further processing
+
+        else:
+            search = search.filter(
+                "range", **{"extent.temporal.interval":{"lte": datetime_search["lte"]}}
+            )
+            search = search.filter(
+                "range", **{"extent.temporal.interval":{"gte": datetime_search["gte"]}}
+            )
+
+        return search
+    
+    @staticmethod
+    def apply_datetime_collections_null_filter(search: Search):
+        """Apply a filter to search based on datetime field.
+
+        Args:
+            search (Search): The search object to filter.
+            datetime_search (dict): The datetime filter criteria.
+
+        Returns:
+            Search: The filtered search object.
+        """
+                
+        search = search.filter("term", **{"extent.temporal.interval": "2201-12-01T12:31:12Z"})
+
+        return search
 
     @staticmethod
     def apply_bbox_filter(search: Search, bbox: List):
@@ -435,6 +510,7 @@ class DatabaseLogic:
             The bounding box is transformed into a polygon using the `bbox2polygon` function and
             a geo_shape filter is added to the search object, set to intersect with the specified polygon.
         """
+        print(bbox2polygon(*bbox))
         return search.filter(
             Q(
                 {
@@ -450,6 +526,52 @@ class DatabaseLogic:
                 }
             )
         )
+    
+    @staticmethod
+    def apply_bbox_collections_filter(search: Search, bbox: List):
+        """Filter search results based on bounding box.
+
+        Args:
+            search (Search): The search object to apply the filter to.
+            bbox (List): The bounding box coordinates, represented as a list of four values [minx, miny, maxx, maxy].
+
+        Returns:
+            search (Search): The search object with the bounding box filter applied.
+        """
+        print(bbox2polygon(*bbox))
+
+
+        search = search.filter({"script": {"script": {"source": f"""
+                                                            def time = params['_source.extent.spatial.bbox'];
+                                                            if (time.size() == 4)
+                                                                return true;
+                                                            """
+                                                           }}})
+
+        return search
+    
+        return search.filter(
+            Q(
+                {
+                    "geo_shape": {
+                        "extent.spatial": {
+                            "shape": {
+                                "bbox": bbox,
+                            },
+                            "relation": "intersects",
+                        }
+                    }
+                }
+            )
+        )
+
+
+
+        return search
+
+        ## testing collection with two arrays defined for bbox, first item in indexed document is -180, -90, 80, 90
+
+        #search.filter("script", **{"script": {"source": f"doc['extent.spatial.bbox'][3] >= {bbox[0]} && doc['extent.spatial.bbox'][1] <= {bbox[3]} && doc['extent.spatial.bbox'][0] <= {bbox[2]} && doc['extent.spatial.bbox'][2] >= {bbox[1]}"}})
 
     @staticmethod
     def apply_intersects_filter(
@@ -483,7 +605,7 @@ class DatabaseLogic:
                 }
             )
         )
-
+    
     @staticmethod
     def apply_stacql_filter(search: Search, op: str, field: str, value: float):
         """Filter search results based on a comparison between a field and a value.
@@ -565,6 +687,91 @@ class DatabaseLogic:
                 ignore_unavailable=ignore_unavailable,
                 query=query,
                 sort=sort or DEFAULT_SORT,
+                search_after=search_after,
+                size=limit,
+            )
+        )
+
+        count_task = asyncio.create_task(
+            self.client.count(
+                index=index_param,
+                ignore_unavailable=ignore_unavailable,
+                body=search.to_dict(count=True),
+            )
+        )
+
+        try:
+            es_response = await search_task
+        except exceptions.NotFoundError:
+            raise NotFoundError(f"Collections '{collection_ids}' do not exist")
+
+        hits = es_response["hits"]["hits"]
+        items = (hit["_source"] for hit in hits)
+
+        next_token = None
+        if hits and (sort_array := hits[-1].get("sort")):
+            next_token = urlsafe_b64encode(
+                ",".join([str(x) for x in sort_array]).encode()
+            ).decode()
+
+        # (1) count should not block returning results, so don't wait for it to be done
+        # (2) don't cancel the task so that it will populate the ES cache for subsequent counts
+        maybe_count = None
+        if count_task.done():
+            try:
+                maybe_count = count_task.result().get("count")
+            except Exception as e:
+                logger.error(f"Count task failed: {e}")
+
+        return items, maybe_count, next_token
+    
+    async def execute_collection_search(
+        self,
+        search: Search,
+        limit: int,
+        base_url: str,
+        token: Optional[str],
+        sort: Optional[Dict[str, Dict[str, str]]],
+        collection_ids: Optional[List[str]],
+        ignore_unavailable: bool = True,
+    ) -> Tuple[Iterable[Dict[str, Any]], Optional[int], Optional[str]]:
+        """Execute a search query with limit and other optional parameters.
+
+        Args:
+            search (Search): The search query to be executed.
+            limit (int): The maximum number of results to be returned.
+            token (Optional[str]): The token used to return the next set of results.
+            sort (Optional[Dict[str, Dict[str, str]]]): Specifies how the results should be sorted.
+            collection_ids (Optional[List[str]]): The collection ids to search.
+            ignore_unavailable (bool, optional): Whether to ignore unavailable collections. Defaults to True.
+
+        Returns:
+            Tuple[Iterable[Dict[str, Any]], Optional[int], Optional[str]]: A tuple containing:
+                - An iterable of search results, where each result is a dictionary with keys and values representing the
+                fields and values of each document.
+                - The total number of results (if the count could be computed), or None if the count could not be
+                computed.
+                - The token to be used to retrieve the next set of results, or None if there are no more results.
+
+        Raises:
+            NotFoundError: If the collections specified in `collection_ids` do not exist.
+        """
+        search_after = None
+        if token:
+            search_after = urlsafe_b64decode(token.encode()).decode().split(",")
+
+        query = search.query.to_dict() if search.query else None
+
+        print(query)
+
+        index_param = "document" #indices(collection_ids)
+
+        search_task = asyncio.create_task(
+            self.client.search(
+                index=COLLECTIONS_INDEX,
+                ignore_unavailable=ignore_unavailable,
+                query=query,
+                sort=sort or DEFAULT_COLLECTIONS_SORT,
                 search_after=search_after,
                 size=limit,
             )
@@ -916,3 +1123,111 @@ class DatabaseLogic:
             body={"query": {"match_all": {}}},
             wait_for_completion=True,
         )
+
+
+    def check_collection_datetime(self, hit, datetime_search):
+        
+        ## If no datetime to be searched return all hits
+        if datetime_search == None:
+            return True
+
+        ## Reformat document datetime to align with supported search format: YYYY-MM-DDTHH:MM:SSZ
+
+        collection_start_date = hit['_source']['extent']['temporal']['interval'][0][0]
+        collection_end_date = hit['_source']['extent']['temporal']['interval'][0][1]
+
+        ## If interval endpoint is not None, convert to datetime object, note we need to limit to first 18 digits, to align with search input format, ISO-8601 (YYYY-MM-DDTHH:MM:SSZ)
+        if collection_start_date != None:
+            collection_start_date = dateutil.parser.isoparse(collection_start_date[0:19] + "Z")
+        if collection_end_date != None:
+            collection_end_date = dateutil.parser.isoparse(collection_end_date[0:19] + "Z")
+
+        if "eq" in datetime_search:
+            input_datetime = dateutil.parser.isoparse(datetime_search['eq'])
+            if collection_start_date == None and collection_end_date == "null":
+                return True
+            if collection_start_date == None and collection_end_date >= input_datetime:
+                return True
+            if collection_end_date == None and collection_start_date <= input_datetime:
+                return True
+            if collection_start_date <= input_datetime and input_datetime <= collection_end_date:
+                return True
+            return False
+        else:
+            input_datetime_start = dateutil.parser.isoparse(datetime_search['gte'])
+            input_datetime_end = dateutil.parser.isoparse(datetime_search['lte'])
+            if collection_start_date == None and collection_end_date == "null":
+                return True
+            if collection_start_date == None and collection_end_date >= input_datetime_start:
+                return True
+            if collection_end_date == None and collection_start_date <= input_datetime_start:
+                return True
+            if collection_start_date <= input_datetime and input_datetime <= collection_end_date:
+                return True
+            if (collection_start_date <= input_datetime_end and input_datetime_start <= collection_end_date):
+                return True
+            return False
+        
+    def check_collection_bbox(self, hit, bbox):
+
+        ## If no bbox to be searched return all hits
+        if bbox == None:
+            return True
+
+        input_bbox = bbox
+        
+        collection_bbox = hit['_source']['extent']['spatial']['bbox'][0]
+        
+        if len(collection_bbox) == 6:
+                collection_bbox = [collection_bbox[0], collection_bbox[1], collection_bbox[3], collection_bbox[4]]
+
+        bbox_lon_min = collection_bbox[0]
+        bbox_lon_max = collection_bbox[2]
+        bbox_lat_min = collection_bbox[1]
+        bbox_lat_max = collection_bbox[3]
+
+        if (bbox_lon_max >= float(input_bbox[0])  and bbox_lon_min <= float(input_bbox[2]) and bbox_lat_min <= float(input_bbox[3]) and bbox_lat_max >= float(input_bbox[1])):
+            return True
+        
+        return False
+
+    async def execute_collection_search_2(
+        self, token: Optional[str], limit: int, base_url: str, datetime_search, bbox
+    ) -> Tuple[List[Dict[str, Any]], Optional[str]]:
+        """Retrieve a list of all collections from Elasticsearch, supporting pagination.
+
+        Args:
+            token (Optional[str]): The pagination token.
+            limit (int): The number of results to return.
+
+        Returns:
+            A tuple of (collections, next pagination token if any).
+        """
+        search_after = None
+        if token:
+            search_after = [token]
+
+        response = await self.client.search(
+            index=COLLECTIONS_INDEX,
+            body={
+                "sort": [{"id": {"order": "asc"}}],
+                "size": limit,
+                "search_after": search_after,
+            },
+        )
+
+        hits = response["hits"]["hits"]
+
+        collections = [
+            self.collection_serializer.db_to_stac(
+                collection=hit["_source"], base_url=base_url
+            )
+            ## This is where we handle the datetime and bbox searching
+            for hit in hits if self.check_collection_datetime(hit, datetime_search) and self.check_collection_bbox(hit,bbox)
+        ]
+
+        next_token = None
+        if len(hits) == limit:
+            next_token = hits[-1]["sort"][0]
+
+        return collections, next_token
