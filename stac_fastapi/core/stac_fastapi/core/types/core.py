@@ -311,6 +311,8 @@ class AsyncBaseFiltersClient(abc.ABC):
 class AsyncCollectionSearchClient(abc.ABC):
     """Defines a pattern for implementing the STAC Collection Search extension."""
 
+    extensions: List[ApiExtension] = attr.ib(default=attr.Factory(list))
+
     async def get_collection_search(
         self,
         bbox: Optional[List[NumType]] = None,
@@ -329,12 +331,18 @@ class AsyncCollectionSearchClient(abc.ABC):
             A list of collections matching search criteria.
         """
         ...
+
+    def extension_is_enabled(self, extension: str) -> bool:
+        """Check if an api extension is enabled."""
+        return any([type(ext).__name__ == extension for ext in self.extensions])
 
 
 @attr.s
 class CollectionSearchClient(abc.ABC):
     """Defines a pattern for implementing the STAC Collection Search extension."""
 
+    extensions: List[ApiExtension] = attr.ib(default=attr.Factory(list))
+
     async def get_collection_search(
         self,
         bbox: Optional[List[NumType]] = None,
@@ -353,3 +361,7 @@ class CollectionSearchClient(abc.ABC):
             A list of collections matching search criteria.
         """
         ...
+
+    def extension_is_enabled(self, extension: str) -> bool:
+        """Check if an api extension is enabled."""
+        return any([type(ext).__name__ == extension for ext in self.extensions])
