@@ -1014,6 +1014,16 @@ class EsAsyncCollectionSearchClient(AsyncCollectionSearchClient):
             )
         )
 
+        context_obj = None
+        if self.extension_is_enabled("ContextExtension"):
+            context_obj = {
+                "returned": len(collections),
+                "limit": limit,
+            }
+            if maybe_count is not None:
+                context_obj["matched"] = maybe_count
+
+
         links = [
             {"rel": Relations.root.value, "type": MimeTypes.json, "href": base_url},
             {"rel": Relations.parent.value, "type": MimeTypes.json, "href": base_url},
@@ -1027,7 +1037,7 @@ class EsAsyncCollectionSearchClient(AsyncCollectionSearchClient):
         if next_token:
             links = await PagingLinks(request=request, next=next_token).get_links()
 
-        return Collections(collections=collections, links=links)
+        return Collections(collections=collections, links=links, context=context_obj)
 
     # todo: use the ES _mapping endpoint to dynamically find what fields exist
     async def get_collection_search(
