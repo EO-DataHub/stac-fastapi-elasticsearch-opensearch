@@ -55,15 +55,6 @@ filter_extension.conformance_classes.append(
 
 database_logic = DatabaseLogic()
 
-collection_search_extension = CollectionSearchExtension(
-    client=EsAsyncCollectionSearchClient(database_logic)
-)
-collection_search_extension.conformance_classes.extend(
-    [
-        "https://api.stacspec.org/v1.0.0-rc.1/collection-search",
-        "https://api.stacspec.org/v1.0.0-rc.1/collection-search#free-text",
-    ]
-)
 
 extensions = [
     FieldsExtension(),
@@ -71,7 +62,6 @@ extensions = [
     SortExtension(),
     TokenPaginationExtension(),
     ContextExtension(),
-    collection_search_extension,
     filter_extension,
 ]
 
@@ -112,7 +102,22 @@ catalog_get_request_model = create_get_catalog_request_model(
     extensions=extensions, base_model=BaseCatalogSearchGetRequest
 )
 
-# Add discovery search here as it requires all other extensions to be passed to it for conformance classes to be identified
+# Add collection search here as it requires other extensions to be passed to it for context extension to be used
+
+collection_search_extension = CollectionSearchExtension(
+    client=EsAsyncCollectionSearchClient(database=database_logic, extensions=extensions)
+)
+collection_search_extension.conformance_classes.extend(
+    [
+        "https://api.stacspec.org/v1.0.0-rc.1/collection-search",
+        "https://api.stacspec.org/v1.0.0-rc.1/collection-search#free-text",
+    ]
+)
+
+extensions.append(collection_search_extension)
+
+# Add discovery search here as it requires all other extensions to be passed to it for conformance classes to be identified 
+# and context extension to be used
 discovery_search_extension = DiscoverySearchExtension(
     client=EsAsyncDiscoverySearchClient(database=database_logic, extensions=extensions),
 )
