@@ -475,6 +475,13 @@ class AsyncBaseFiltersClient(abc.ABC):
 class AsyncCollectionSearchClient(abc.ABC):
     """Defines a pattern for implementing the STAC Collection Search extension."""
 
+    database = attr.ib(default=BaseDatabaseLogic)
+    extensions: List[ApiExtension] = attr.ib(default=attr.Factory(list))
+
+    def extension_is_enabled(self, extension: str) -> bool:
+        """Check if an api extension is enabled."""
+        return any([type(ext).__name__ == extension for ext in self.extensions])
+
     async def get_all_collections(
         self,
         bbox: Optional[List[NumType]] = None,
@@ -509,6 +516,13 @@ class AsyncCollectionSearchClient(abc.ABC):
 @attr.s
 class AsyncDiscoverySearchClient(abc.ABC):
     """Defines a pattern for implementing the STAC Collection Search extension."""
+
+    database = attr.ib(default=BaseDatabaseLogic)
+    extensions: List[ApiExtension] = attr.ib(default=attr.Factory(list))
+
+    def extension_is_enabled(self, extension: str) -> bool:
+        """Check if an api extension is enabled."""
+        return any([type(ext).__name__ == extension for ext in self.extensions])
 
     async def get_discovery_search(
         self,

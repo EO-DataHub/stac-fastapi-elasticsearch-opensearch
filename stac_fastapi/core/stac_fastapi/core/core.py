@@ -1530,6 +1530,8 @@ class EsAsyncCollectionSearchClient(AsyncCollectionSearchClient):
     """Defines a pattern for implementing the STAC collection search extension."""
 
     database: BaseDatabaseLogic = attr.ib()
+    extensions: List[ApiExtension] = attr.ib(default=attr.Factory(list))
+
     post_request_model = attr.ib(default=BaseCollectionSearchPostRequest)
     collection_serializer: Type[CollectionSerializer] = attr.ib(
         default=CollectionSerializer
@@ -1596,11 +1598,22 @@ class EsAsyncCollectionSearchClient(AsyncCollectionSearchClient):
             )
         )
 
+        context_obj = None
+        if self.extension_is_enabled("ContextExtension"):
+            context_obj = {
+                "returned": len(collections),
+                "limit": limit,
+            }
+            if maybe_count is not None:
+                context_obj["matched"] = maybe_count
+
         links = []
         if next_token:
             links = await PagingLinks(request=request, next=next_token).get_links()
 
-        return Collections(collections=collections, links=links)
+        return Collections(
+            collections=collections, links=links, context_obj=context_obj
+        )
 
     # todo: use the ES _mapping endpoint to dynamically find what fields exist
     async def get_all_collections(
@@ -1721,12 +1734,23 @@ class EsAsyncDiscoverySearchClient(AsyncDiscoverySearchClient):
             )
         )
 
+        context_obj = None
+        if self.extension_is_enabled("ContextExtension"):
+            context_obj = {
+                "returned": len(catalogs_and_collections),
+                "limit": limit,
+            }
+            if maybe_count is not None:
+                context_obj["matched"] = maybe_count
+
         links = []
         if next_token:
             links = await PagingLinks(request=request, next=next_token).get_links()
 
         return CatalogsAndCollections(
-            catalogs_and_collections=catalogs_and_collections, links=links
+            catalogs_and_collections=catalogs_and_collections,
+            links=links,
+            context_obj=context_obj,
         )
 
     # todo: use the ES _mapping endpoint to dynamically find what fields exist
