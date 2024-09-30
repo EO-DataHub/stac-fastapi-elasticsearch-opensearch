@@ -2281,6 +2281,11 @@ class EsAsyncBaseFiltersClient(AsyncBaseFiltersClient):
                     "minimum": 0,
                     "maximum": 100,
                 },
+                "grid": {
+                    "description": "ES Grid",
+                    "title": "Grid",
+                    "type": "string",
+                },
             },
             "additionalProperties": True,
         }

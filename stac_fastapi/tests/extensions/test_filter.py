@@ -146,6 +146,7 @@ async def test_search_filter_ext_and_get_cql2text_cloud_cover_no_results(
     assert resp.status_code == 200
     assert len(resp.json()["features"]) == 0
 
+# TODO: Add a test here for 'grid' custom property
 
 @pytest.mark.asyncio
 async def test_search_filter_ext_and_post(app_client, ctx):

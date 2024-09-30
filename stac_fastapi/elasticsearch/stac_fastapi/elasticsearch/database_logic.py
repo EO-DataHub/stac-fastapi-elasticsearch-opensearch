@@ -159,6 +159,8 @@ ES_ITEMS_MAPPINGS = {
                 # Satellite Extension https://github.com/stac-extensions/sat
                 "sat:absolute_orbit": {"type": "integer"},
                 "sat:relative_orbit": {"type": "integer"},
+                # CMIP6 Specific
+                "grid": {"type": "keyword"}, # e.g. "gs1x1"
             },
         },
     },
