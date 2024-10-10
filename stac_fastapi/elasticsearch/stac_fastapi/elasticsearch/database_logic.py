@@ -1622,7 +1622,7 @@ class DatabaseLogic:
             # catalog_index = catalog_index.replace("collections_", "collections_*")
         else:
             # catalog_index = f"{COLLECTIONS_INDEX_PREFIX}*"
-            return [], 0, None, None
+            return [], 0, None, []
 
         # Logic to ensure next token only returned when further results are available
         max_result_window = stac_fastapi.types.search.Limit.le
