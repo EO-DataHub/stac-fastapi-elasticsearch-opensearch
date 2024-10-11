@@ -2340,7 +2340,7 @@ class EsAsyncCollectionSearchClient(AsyncCollectionSearchClient):
         base_url = str(request.base_url)
         token = request.query_params.get("token")
         limit = int(request.query_params.get("limit", 10))
-        glob = strtobool(request.query_params.get("glob", False))
+        glob = strtobool(request.query_params.get("glob", "false"))
 
         # Extract X-Username header from username_header for access control
         username = username_header.get("X-Username", "")
