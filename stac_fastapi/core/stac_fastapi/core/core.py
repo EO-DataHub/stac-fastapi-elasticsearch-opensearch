@@ -58,8 +58,8 @@ from stac_fastapi.types.search import (
     Limit,
 )
 from stac_fastapi.types.stac import (
-    Catalogs,
     Catalog,
+    Catalogs,
     CatalogsAndCollections,
     Collection,
     Collections,
