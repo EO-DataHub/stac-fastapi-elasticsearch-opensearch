@@ -325,7 +325,8 @@ def index_catalogs_by_catalog_id(catalog_path_list: Optional[List[str]] = None) 
         new_catalog_path_list.reverse()
         return f"{CATALOGS_INDEX_PREFIX}{CATALOG_SEPARATOR.join(''.join(c for c in catalog_id.lower() if c not in ES_INDEX_NAME_UNSUPPORTED_CHARS) for catalog_id in new_catalog_path_list)}"
     # Potentially may only want top-level catalogs, so need to add BASE to index here
-    return f"{CATALOGS_INDEX_PREFIX}*"
+    # return f"{CATALOGS_INDEX_PREFIX}*"
+    return ROOT_CATALOGS_INDEX
 
 
 def indices(
