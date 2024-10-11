@@ -1622,14 +1622,15 @@ class DatabaseLogic:
             catalog_index = index_collections_by_catalog_id(catalog_path_list)
             if glob:
                 logger.info("Performing global collections search")
-                catalog_index = catalog_index.replace("collections_", "collections_*") # Search all collections
+                catalog_index = catalog_index.replace(
+                    "collections_", "collections_*"
+                )  # Search all collections
         else:
             if glob:
                 logger.info("Performing global collections search")
                 catalog_index = f"{COLLECTIONS_INDEX_PREFIX}*"  # Search all collections
             else:
-                return [], 0, None, [] # No collections at top level
-            
+                return [], 0, None, []  # No collections at top level
 
         # Logic to ensure next token only returned when further results are available
         max_result_window = stac_fastapi.types.search.Limit.le
