@@ -5,6 +5,7 @@ import os
 import re
 from datetime import datetime as datetime_type
 from datetime import timezone
+from distutils.util import strtobool
 from typing import Any, Dict, List, Optional, Set, Type, Union
 from urllib.parse import unquote_plus, urljoin
 
@@ -2339,6 +2340,7 @@ class EsAsyncCollectionSearchClient(AsyncCollectionSearchClient):
         base_url = str(request.base_url)
         token = request.query_params.get("token")
         limit = int(request.query_params.get("limit", 10))
+        glob = strtobool(request.query_params.get("glob", False))
 
         # Extract X-Username header from username_header for access control
         username = username_header.get("X-Username", "")
@@ -2409,6 +2411,7 @@ class EsAsyncCollectionSearchClient(AsyncCollectionSearchClient):
                     base_url=base_url,
                     token=token,
                     sort=sort,
+                    glob=glob,
                     catalog_path=catalog_path,
                 )
             )
@@ -2451,6 +2454,7 @@ class EsAsyncCollectionSearchClient(AsyncCollectionSearchClient):
         datetime: Optional[Union[str, datetime_type]] = None,
         limit: Optional[int] = 10,
         q: Optional[List[str]] = None,
+        glob: Optional[bool] = False,
         **kwargs,
     ) -> Collections:
         """Get search results from the database for collections.
@@ -2480,6 +2484,7 @@ class EsAsyncCollectionSearchClient(AsyncCollectionSearchClient):
             "bbox": bbox,
             "datetime": datetime,
             "q": q,
+            "glob": glob,
         }
 
         # Do the request
