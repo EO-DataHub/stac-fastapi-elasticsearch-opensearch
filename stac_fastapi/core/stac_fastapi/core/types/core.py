@@ -482,6 +482,7 @@ class AsyncCollectionSearchClient(abc.ABC):
         datetime: Optional[Union[str, datetime]] = None,
         limit: Optional[int] = 10,
         q: Optional[List[str]] = None,
+        glob: Optional[bool] = False,
         **kwargs,
     ) -> stac_types.Collections:
         """Cross catalog search (GET) for collections.
