@@ -1,6 +1,7 @@
 """Serializers."""
 
 import abc
+import os
 from copy import deepcopy
 from typing import Any
 from urllib.parse import urljoin
@@ -280,7 +281,13 @@ class CatalogSerializer(Serializer):
                     link_rels.append("search_post")
                 elif link["method"] == "GET":
                     link_rels.append("search_get")
-                link["href"] = urljoin(base_url, f"{catalog_url}/search")
+
+                if catalog_id == "planet" and "supported-datasets" in catalog_path:
+                    link["href"] = urljoin(os.environ["PLANET_API_URL"], "/search")
+                else:
+                    link["href"] = urljoin(base_url, f"{catalog_url}/search")
+
+                print(base_url)
             elif link["rel"] == "parent":
                 link["href"] = urljoin(base_url, f"{parent_url}")
 
