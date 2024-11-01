@@ -10,7 +10,7 @@ import attr
 from elasticsearch_dsl import Q, Search
 
 import stac_fastapi.types.search
-from elasticsearch import exceptions, helpers  # type: ignore
+from elasticsearch import exceptions, helpers, NotFoundError  # type: ignore
 from stac_fastapi.core.extensions import filter
 from stac_fastapi.core.serializers import (
     CatalogCollectionSerializer,
@@ -516,8 +516,30 @@ async def delete_item_index(collection_id: str, catalog_path_list: List[str]):
         await client.indices.delete(index=name)
     await client.close()
 
+async def delete_item_index_by_catalog(catalog_path_list: List[str]):
+    """Delete the index for items in a collection, specifying the catalog and top-level catalog.
 
-async def delete_collection_index(catalog_path_list: List[str]):
+    Args:
+        collection_id (str): The ID of the collection whose items index will be deleted.
+        catalog_path (List[str]): The path for the catalog whose items index will be deleted.
+        super_catalog_id (str): The ID of the top-level catalog whose items index will be deleted.
+    """
+    client = AsyncElasticsearchSettings().create_client
+
+    # Index by catalog path, then replace the catalog index with the items index
+    name = index_catalogs_by_catalog_id(catalog_path_list=catalog_path_list).replace(CATALOGS_INDEX_PREFIX, ITEMS_INDEX_PREFIX)
+    name = name.replace("items_", f"items_*{GROUP_SEPARATOR}", 1) # ensure we are looking in collections that sit within the specified catalog
+    resolved = await client.indices.resolve_index(name=name)
+    if "aliases" in resolved and resolved["aliases"]:
+        [alias] = resolved["aliases"]
+        await client.indices.delete_alias(index=alias["indices"], name=alias["name"])
+        await client.indices.delete(index=alias["indices"])
+    else:
+        await client.indices.delete(index=name)
+    await client.close()
+
+
+async def delete_collection_index_by_catalog(catalog_path_list: List[str]):
     """Delete the index for collections in a catalog, specifying the top-level catalog.
 
     Args:
@@ -527,6 +549,9 @@ async def delete_collection_index(catalog_path_list: List[str]):
     client = AsyncElasticsearchSettings().create_client
 
     name = index_collections_by_catalog_id(catalog_path_list=catalog_path_list)
+
+    # Need to include all subcatalogs as well
+    name = name.replace("collections_", "collections*_", 1)
     resolved = await client.indices.resolve_index(name=name)
     try:
         if "aliases" in resolved and resolved["aliases"]:
@@ -553,6 +578,7 @@ async def delete_catalog_index(catalog_path_list: List[str]):
     client = AsyncElasticsearchSettings().create_client
 
     name = index_catalogs_by_catalog_id(catalog_path_list=catalog_path_list)
+    name = name.replace("catalogs_", "catalogs*_", 1)
     resolved = await client.indices.resolve_index(name=name)
     try:
         if "aliases" in resolved and resolved["aliases"]:
@@ -1619,7 +1645,7 @@ class DatabaseLogic:
         if catalog_path:
             catalog_path_list = catalog_path.split("/")
             catalog_index = index_collections_by_catalog_id(catalog_path_list)
-            catalog_index = catalog_index.replace("collections_", "collections*_")
+            catalog_index = catalog_index.replace("collections_", "collections*_", 1)
         else:
             catalog_index = f"{COLLECTIONS_INDEX_PREFIX}*"
 
@@ -2903,60 +2929,29 @@ class DatabaseLogic:
             index = ROOT_CATALOGS_INDEX
 
         await self.client.delete(index=index, id=catalog_id, refresh=refresh)
-        # Need to delete all catalogs contained in this catalog
-        index_param = index_catalogs_by_catalog_id(catalog_path_list=catalog_path_list)
-        try:
-            response = await self.client.search(
-                index=index_param,
-                body={"sort": [{"id": {"order": "asc"}}]},
-            )
-            # Delete each catalog recursively
-            await asyncio.gather(
-                *[
-                    self.delete_catalog(catalog_path=f"{catalog_path}/{hit['_id']}")
-                    for hit in response["hits"]["hits"]
-                ],
-                return_exceptions=True,
-            )
-        except exceptions.NotFoundError:
-            logger.info(
-                f"Catalog {catalog_id} at {'path ' + '/'.join(catalog_path_list[:-1]) if len(catalog_path_list) > 1 else 'top-level'} has no catalogs, so index does not exist and cannot be deleted, continuing as normal."
-            )
 
-        # Need to delete all collections contained in this catalog
-        index_param = collection_indices(catalog_paths=[catalog_path_list])
-        try:
-            response = await self.client.search(
-                index=index_param,
-                body={"sort": [{"id": {"order": "asc"}}]},
-            )
-            collection_ids = [hit["_id"] for hit in response["hits"]["hits"]]
-            await asyncio.gather(
-                *[
-                    delete_item_index(
-                        collection_id=collection_id, catalog_path_list=catalog_path_list
-                    )
-                    for collection_id in collection_ids
-                ],
-                return_exceptions=True,
-            )
-        except exceptions.NotFoundError:
-            logger.info(
-                f"Some collection at path {catalog_path} has no items, so index does not exist and cannot be deleted, continuing as normal."
-            )
-
-        try:
-            await delete_collection_index(catalog_path_list=catalog_path_list)
-        except exceptions.NotFoundError:
-            logger.info(
-                f"Catalog {catalog_id} at {'path ' + '/'.join(catalog_path_list[:-1]) if len(catalog_path_list) > 1 else 'top-level'} has no collections, so index does not exist and cannot be deleted, continuing as normal."
-            )
+        # Remove index for catalogs in this index
         try:
             await delete_catalog_index(catalog_path_list=catalog_path_list)
-        except exceptions.NotFoundError:
-            logger.info(
-                f"Catalog {catalog_id} at {'path ' + '/'.join(catalog_path_list[:-1]) if len(catalog_path_list) > 1 else 'top-level'} has no catalogs, so index does not exist and cannot be deleted, continuing as normal."
+        except NotFoundError:
+            logger.warning(
+                f"Catalog {catalog_id} at {'path ' + '/'.join(catalog_path_list[:-1]) if len(catalog_path_list) > 1 else 'top-level'} has no subcatalogs, so index does not exist and cannot be deleted, continuing as normal."
             )
+        # Remove index for collections in this index
+        try:
+            await delete_collection_index_by_catalog(catalog_path_list=catalog_path_list)
+        except NotFoundError:
+            logger.warning(
+                f"Catalog {catalog_id} at {'path ' + '/'.join(catalog_path_list[:-1]) if len(catalog_path_list) > 1 else 'top-level'} has no collections, so index does not exist and cannot be deleted, continuing as normal."
+            )
+        # Remove index for items in this index
+        try:
+            await delete_item_index_by_catalog(catalog_path_list=catalog_path_list)
+        except NotFoundError:
+            logger.warning(
+                f"Catalog {catalog_id} at {'path ' + '/'.join(catalog_path_list[:-1]) if len(catalog_path_list) > 1 else 'top-level'} has no items, so index does not exist and cannot be deleted, continuing as normal."
+            )
+
 
     async def bulk_async(
         self,
