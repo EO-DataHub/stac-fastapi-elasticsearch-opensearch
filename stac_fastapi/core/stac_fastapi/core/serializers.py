@@ -368,7 +368,7 @@ class CatalogSerializer(Serializer):
             child_link = {
                 "rel": Relations.child.value,
                 "type": MimeTypes.json,
-                "href": urljoin(collections_href, collection_id),
+                "href": urljoin(collections_href, f"{collection_id}"),
             }
             catalog_links.append(child_link)
 
