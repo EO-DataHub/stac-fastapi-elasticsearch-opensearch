@@ -268,10 +268,8 @@ class CatalogSerializer(Serializer):
 
         if catalog_id == "planet" and catalog_path == "supported-datasets":
             search_href = urljoin(base_url, f'{os.environ["PLANET_API_URL"]}/search')
-            collections_href = urljoin(base_url, f'{os.environ["PLANET_API_URL"]}/collections')
         else:
             search_href = urljoin(base_url, f"{catalog_url}/search")
-            collections_href = urljoin(base_url, f"{catalog_url}/collections"),
 
         # The following links should be rewritten for this catalog
         link_rels = []
@@ -299,7 +297,7 @@ class CatalogSerializer(Serializer):
             {
                 "rel": "data",
                 "type": MimeTypes.json,
-                "href": collections_href,
+                "href": urljoin(base_url, f"{catalog_url}/collections"),
             }
         )
         catalog_links.append(
@@ -368,7 +366,7 @@ class CatalogSerializer(Serializer):
             child_link = {
                 "rel": Relations.child.value,
                 "type": MimeTypes.json,
-                "href": urljoin(collections_href, f"{collection_id}"),
+                "href": urljoin(base_url, f"{catalog_url}/collections/{collection_id}"),
             }
             catalog_links.append(child_link)
 
