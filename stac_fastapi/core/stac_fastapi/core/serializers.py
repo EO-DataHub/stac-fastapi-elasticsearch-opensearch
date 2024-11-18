@@ -265,6 +265,8 @@ class CatalogSerializer(Serializer):
         # Construct catalog url path prefix
         catalog_url = f"catalogs/{full_catalog_path}"
 
+        search_href = urljoin(base_url, f"{catalog_url}/search")
+
         # The following links should be rewritten for this catalog
         link_rels = []
         for link in catalog_links:
@@ -281,7 +283,7 @@ class CatalogSerializer(Serializer):
                 elif link["method"] == "GET":
                     link_rels.append("search_get")
 
-                link["href"] = urljoin(base_url, f"{catalog_url}/search")
+                link["href"] = search_href
 
             elif link["rel"] == "parent":
                 link["href"] = urljoin(base_url, f"{parent_url}")
@@ -330,7 +332,7 @@ class CatalogSerializer(Serializer):
                 {
                     "rel": Relations.search.value,
                     "type": MimeTypes.json,
-                    "href": href,
+                    "href": search_href,
                     "method": "POST",
                 }
             )
@@ -339,7 +341,7 @@ class CatalogSerializer(Serializer):
                 {
                     "rel": Relations.search.value,
                     "type": MimeTypes.geojson,
-                    "href": href,
+                    "href": search_href,
                     "method": "GET",
                 }
             )
