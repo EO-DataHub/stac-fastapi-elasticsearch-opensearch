@@ -212,7 +212,10 @@ class CoreClient(AsyncBaseCoreClient):
 
         catalogs = []
 
+        count = 0
         while True:
+            logger.info("In for loop %s", count)
+            count += 1
             temp_catalogs, next_token = await self.database.get_catalog_subcatalogs(
                 token=None, limit=NUMBER_OF_CATALOG_COLLECTIONS, base_url=base_url
             )
@@ -220,7 +223,7 @@ class CoreClient(AsyncBaseCoreClient):
             for catalog in temp_catalogs:
                 # Get access control array for each catalog
                 try:
-                    access_control = catalog["access_control"]
+                    access_control = catalog["access_control_workspaces"]
                     # Append catalog to list if user has access
                     # Convert to int to ensure 0 is falsy and 1 is truthy
                     if int(access_control[-1]) or int(access_control[user_index]):
@@ -363,7 +366,10 @@ class CoreClient(AsyncBaseCoreClient):
 
         collections = []
 
+        count = 0
         while True:
+            logger.info("In for loop %s", count)
+            count += 1
             temp_collections, next_token, hit_tokens = (
                 await self.database.get_all_collections(
                     token=token, limit=limit, base_url=base_url
@@ -375,8 +381,9 @@ class CoreClient(AsyncBaseCoreClient):
             ):
                 # Get access control array for each collection
                 try:
-                    access_control = collection["access_control"]
-                    collection.pop("access_control")
+                    access_control = collection["access_control_workspaces"]
+                    collection.pop("access_control_owner")
+                    collection.pop("access_control_workspaces")
                     # Append collection to list if user has access
                     if int(access_control[-1]) or int(access_control[user_index]):
                         collections.append(collection)
@@ -443,8 +450,10 @@ class CoreClient(AsyncBaseCoreClient):
 
             # Get access control array for each catalog
             try:
-                access_control = catalog["access_control"]
-                catalog.pop("access_control")
+                logger.info(catalog)
+                access_control = catalog["access_control_workspaces"]
+                catalog.pop("access_control_owner")
+                catalog.pop("access_control_workspaces")
                 # Check access control
                 if not int(access_control[-1]):  # Catalog is private
                     if username == "":  # User is not logged in
@@ -472,7 +481,10 @@ class CoreClient(AsyncBaseCoreClient):
 
         catalogs = []
 
+        count = 0
         while True:
+            logger.info("In for loop %s", count)
+            count += 1
             # Search is run continually until limit is reached or no more results
             temp_catalogs, next_token, hit_tokens = (
                 await self.database.get_all_catalogs(
@@ -488,8 +500,10 @@ class CoreClient(AsyncBaseCoreClient):
             for i, (catalog, hit_token) in enumerate(zip(temp_catalogs, hit_tokens)):
                 # Get access control array for each catalog
                 try:
-                    access_control = catalog["access_control"]
-                    catalog.pop("access_control")
+                    logger.info(catalog)
+                    access_control = catalog["access_control_workspaces"]
+                    catalog.pop("access_control_owner")
+                    catalog.pop("access_control_workspaces")
                     # Add catalog to list if user has access
                     if int(access_control[-1]) or int(access_control[user_index]):
                         catalogs.append(catalog)
@@ -555,8 +569,9 @@ class CoreClient(AsyncBaseCoreClient):
         user_index = hash_to_index(username)
         # Get access control array for each collection
         try:
-            access_control = collection["access_control"]
-            collection.pop("access_control")
+            access_control = collection["access_control_workspaces"]
+            collection.pop("access_control_owner")
+            collection.pop("access_control_workspaces")
             # Check access control
             if not int(access_control[-1]):  # Collection is private
                 if username == "":  # User is not logged in
@@ -619,8 +634,9 @@ class CoreClient(AsyncBaseCoreClient):
         user_index = hash_to_index(username)
         # Get access control array for each catalog
         try:
-            access_control = catalog["access_control"]
-            catalog.pop("access_control")
+            access_control = catalog["access_control_workspaces"]
+            catalog.pop("access_control_owner")
+            catalog.pop("access_control_workspaces")
             # Check access control
             if not int(access_control[-1]):  # Catalog is private
                 if username == "":  # User is not logged in
@@ -655,8 +671,9 @@ class CoreClient(AsyncBaseCoreClient):
         for collection in collections[:]:
             # Get access control array for each collection
             try:
-                access_control = collection["access_control"]
-                collection.pop("access_control")
+                access_control = collection["access_control_workspaces"]
+                catalog.pop("access_control_owner")
+                collection.pop("access_control_workspaces")
                 # Remove collection from list if user does not have access
                 if not int(access_control[-1]) and not int(access_control[user_index]):
                     collections.remove(collection)
@@ -677,8 +694,9 @@ class CoreClient(AsyncBaseCoreClient):
         for sub_catalog in sub_catalogs[:]:
             # Get access control array for each catalog
             try:
-                access_control = sub_catalog["access_control"]
-                sub_catalog.pop("access_control")
+                access_control = sub_catalog["access_control_workspaces"]
+                sub_catalog.pop("access_control_owner")
+                sub_catalog.pop("access_control_workspaces")
                 # Remove catalog from list if user does not have access
                 if not int(access_control[-1]) and not int(access_control[user_index]):
                     sub_catalogs.remove(sub_catalog)
@@ -745,7 +763,7 @@ class CoreClient(AsyncBaseCoreClient):
 
         # Get access control array for the collection
         try:
-            access_control = collection["access_control"]
+            access_control = collection["access_control_workspaces"]
             # Check access control
             if not int(access_control[-1]):  # Collection is private
                 if username == "":  # User is not logged in
@@ -868,7 +886,7 @@ class CoreClient(AsyncBaseCoreClient):
         user_index = hash_to_index(username)
         # Get access control array for each collection
         try:
-            access_control = collection["access_control"]
+            access_control = collection["access_control_workspaces"]
             # Check access control
             if not int(access_control[-1]):  # Collection is private
                 if username == "":  # User is not logged in
@@ -1169,7 +1187,7 @@ class CoreClient(AsyncBaseCoreClient):
             catalog = await self.database.find_catalog(catalog_path=catalog_path)
             # Get access control array for each catalog
             try:
-                access_control = catalog["access_control"]
+                access_control = catalog["access_control_workspaces"]
                 # Remove catalog from list if user does not have access
                 if not int(access_control[-1]) and not int(access_control[user_index]):
                     search_request.catalog_paths.remove(catalog_path)
@@ -1186,7 +1204,7 @@ class CoreClient(AsyncBaseCoreClient):
                 )
                 # Get access control array for each collection
                 try:
-                    access_control = collection["access_control"]
+                    access_control = collection["access_control_workspaces"]
                     # Remove catalog from list if user does not have access
                     if not int(access_control[-1]) and not int(
                         access_control[user_index]
@@ -1216,7 +1234,10 @@ class CoreClient(AsyncBaseCoreClient):
                 context={"returned": 0, "limit": limit},
             )
 
+        count = 0
         while True:
+            logger.info("In for loop %s", count)
+            count += 1
             temp_items, maybe_count, next_token, hit_tokens = (
                 await self.database.execute_search(
                     search=search,
@@ -1242,7 +1263,7 @@ class CoreClient(AsyncBaseCoreClient):
                     )
                     # Get access control array for this collection
                     try:
-                        access_control = collection["access_control"]
+                        access_control = collection["access_control_workspaces"]
                         # Append item to list if user has access
                         if int(access_control[-1]) or int(access_control[user_index]):
                             items.append(item)
@@ -1263,7 +1284,7 @@ class CoreClient(AsyncBaseCoreClient):
                         catalog_path=item_catalog_path
                     )
                     try:
-                        access_control = catalog["access_control"]
+                        access_control = catalog["access_control_workspaces"]
                         # Append item to list if user has access
                         if int(access_control[-1]) or int(access_control[user_index]):
                             items.append(item)
@@ -1484,7 +1505,7 @@ class CoreClient(AsyncBaseCoreClient):
         catalog = await self.database.find_catalog(catalog_path=catalog_path)
         # Get access control array for each catalog
         try:
-            access_control = catalog["access_control"]
+            access_control = catalog["access_control_workspaces"]
             # Check access control
             if not int(access_control[-1]):  # Collection is private
                 if username == "":  # User is not logged in
@@ -1519,7 +1540,7 @@ class CoreClient(AsyncBaseCoreClient):
             )
             # Get access control array for each collection
             try:
-                access_control = collection["access_control"]
+                access_control = collection["access_control_workspaces"]
                 # Remove catalog from list if user does not have access
                 if not int(access_control[-1]) and not int(access_control[user_index]):
                     collections.remove(collection_id)
@@ -1591,7 +1612,10 @@ class CoreClient(AsyncBaseCoreClient):
 
         items = []
 
+        count = 0
         while True:
+            logger.info("In for loop %s", count)
+            count += 1
             temp_items, maybe_count, next_token, hit_tokens = (
                 await self.database.execute_search(
                     search=search,
@@ -1617,7 +1641,7 @@ class CoreClient(AsyncBaseCoreClient):
                     )
                     # Get access control array for this collection
                     try:
-                        access_control = collection["access_control"]
+                        access_control = collection["access_control_workspaces"]
                         # Append item to list if user has access
                         if int(access_control[-1]) or int(access_control[user_index]):
                             items.append(item)
@@ -1637,7 +1661,7 @@ class CoreClient(AsyncBaseCoreClient):
                         catalog_path=item_catalog_path
                     )
                     try:
-                        access_control = catalog["access_control"]
+                        access_control = catalog["access_control_workspaces"]
                         # Append item to list if user has access
                         if int(access_control[-1]) or int(access_control[user_index]):
                             items.append(item)
@@ -1735,7 +1759,6 @@ class TransactionsClient(AsyncBaseTransactionsClient):
             item (stac_types.Item): The item to be added to the collection.
             username_header (dict): X-Username header from the request.
             workspace (str): The workspace being used to create the item.
-            is_public (bool): Whether the item is public or not.
             **kwargs: Additional keyword arguments.
 
         Returns:
@@ -1831,20 +1854,23 @@ class TransactionsClient(AsyncBaseTransactionsClient):
         now = datetime_type.now(timezone.utc).isoformat().replace("+00:00", "Z")
         item["properties"]["updated"] = now
 
+        # Check the owner of the specified parent collection
+        collection = await self.database.find_collection(
+            collection_id=collection_id, catalog_path=catalog_path
+        )
+        collection_owner = collection["access_control_owner"]
+
         # Confirm that the workspace provides correct access to the part of the catalogue to be altered
         # check kubernetes manifest for given workspace to confirm access
         # TODO: use Kubernetes API to confirm sub-catalog path access required for transaction
         # For now, if this is a user workspace, confirm the changes are being made to the user's own workspace sub-catalog
         # e.g. user-datasets/user-workspace/collection
         if workspace != "default_workspace":
-            catalog_path_with_slash = f"{catalog_path}/" if catalog_path else ""
-            # This workspace can only write to the user-datasets/user-workspace sub-catalog
-            if not catalog_path or not catalog_path_with_slash.startswith(
-                f"user-datasets/{workspace}/"
-            ):
+            # if not default_workspace, this is a user workspace
+            if workspace != collection_owner:
                 raise HTTPException(
                     status_code=403,
-                    detail=f"Workspace {workspace} does not have access to {catalog_path if catalog_path else 'top-level'} catalog",
+                    detail=f"Workspace {workspace} does not have access to parent Collection {collection_id} at {catalog_path if catalog_path else 'top-level'} catalog",
                 )
 
         # Note, if the provided item is not valid stac, this may delete the item and them fail to create the new one
@@ -1918,6 +1944,7 @@ class TransactionsClient(AsyncBaseTransactionsClient):
         collection: stac_types.Collection,
         workspace: str,
         is_public: bool = False,
+        # access_list: List[str] = [],
         **kwargs,
     ) -> stac_types.Collection:
         """Create a new collection in the database.
@@ -1938,7 +1965,7 @@ class TransactionsClient(AsyncBaseTransactionsClient):
         """
         logger.info("Creating collection")
 
-        # Handle case where no catalog is provided
+        # Handle case where no collection is provided
         if not collection:
             raise HTTPException(status_code=400, detail="No collection provided")
 
@@ -1975,8 +2002,11 @@ class TransactionsClient(AsyncBaseTransactionsClient):
         else:
             username = ""
 
-        # Generate bitstring for entry
-        bitstring = "".join(create_bitstring(uid=username, is_public=is_public))
+        # Generate user access bitstring for entry
+        access_list = [username]
+        workspace_access_bitstring = create_bitstring(
+            ids=access_list, is_public=is_public
+        )
 
         collection = self.database.collection_serializer.stac_to_db(
             collection, base_url
@@ -1985,7 +2015,10 @@ class TransactionsClient(AsyncBaseTransactionsClient):
             catalog_path=catalog_path, collection=collection, base_url=base_url
         )
         await self.database.create_collection(
-            catalog_path=catalog_path, collection=collection, access_control=bitstring
+            catalog_path=catalog_path,
+            collection=collection,
+            owner=username,
+            access_control=workspace_access_bitstring,
         )
         return CollectionSerializer.db_to_stac(
             catalog_path=catalog_path, collection=collection, base_url=base_url
@@ -2021,17 +2054,20 @@ class TransactionsClient(AsyncBaseTransactionsClient):
         logger.info("Updating collection")
         base_url = str(kwargs["request"].base_url)
 
+        # Check the owner of the specified collection
+        collection = await self.database.find_collection(
+            collection_id=collection_id, catalog_path=catalog_path
+        )
+        collection_owner = collection["access_control_owner"]
+
         # Confirm that the workspace provides correct access to the part of the catalogue to be altered
         # check kubernetes manifest for given workspace to confirm access
         # TODO: use Kubernetes API to confirm sub-catalog path access required for transaction
         # For now, if this is a user workspace, confirm the changes are being made to the user's own workspace sub-catalog
         # e.g. user-datasets/user-workspace/collection
         if workspace != "default_workspace":
-            catalog_path_with_slash = f"{catalog_path}/" if catalog_path else ""
-            # This workspace can only write to the user-datasets/user-workspace sub-catalog
-            if not catalog_path or not catalog_path_with_slash.startswith(
-                f"user-datasets/{workspace}/"
-            ):
+            # if not default_workspace, this is a user workspace
+            if workspace != collection_owner:
                 raise HTTPException(
                     status_code=403,
                     detail=f"Workspace {workspace} does not have access to {catalog_path if catalog_path else 'top-level'} catalog",
@@ -2094,6 +2130,108 @@ class TransactionsClient(AsyncBaseTransactionsClient):
         )
         return None
 
+    async def update_catalog_access_control(
+        self,
+        workspace: str,
+        catalog_path: str,
+        is_public: bool = False,
+        access_list: List[str] = [],
+        **kwargs,
+    ):
+
+        # Get catalog_id from path
+        catalog_path_list = catalog_path.split("/")
+        catalog_id = catalog_path_list[-1]
+        parent_catalog_path = (
+            "/".join(catalog_path_list[:-1])
+            if len(catalog_path_list) > 1
+            else "top-level Catalog"
+        )
+
+        logger.info(
+            "Updating access control for Catalog %s in Catalog %s",
+            catalog_id,
+            parent_catalog_path,
+        )
+
+        # Retrive catalog to confirm owning workspace
+        catalog = await self.database.find_catalog(catalog_path=catalog_path)
+        owner = catalog["access_control_owner"]
+
+        if workspace == "default_workspace":
+            if catalog_path_list[0] == "user-datasets":
+                workspace = catalog_path_list[1]
+
+        logger.info("Input workspace set to %s", workspace)
+
+        if not owner == workspace:
+            raise HTTPException(
+                status_code=403, detail="Workspace does not have access to this Catalog"
+            )
+
+        # Generate workspace access bitstring for entry
+        access_list.append(workspace)
+        user_access_bitstring = create_bitstring(ids=access_list, is_public=is_public)
+
+        await self.database.update_catalog_access_control(
+            catalog_path=catalog_path,
+            access_control=user_access_bitstring,
+        )
+
+        logger.info(
+            f"Updated access for Catalog {catalog_id} in Catalog {parent_catalog_path} to "
+            f"be {'public' if is_public else 'private'} with access for {access_list}"
+        )
+
+    @overrides
+    async def update_collection_access_control(
+        self,
+        workspace: str,
+        collection_id: str,
+        catalog_path: Optional[str] = None,
+        is_public: bool = False,
+        access_list: List[str] = [],
+        **kwargs,
+    ):
+
+        logger.info(
+            "Updating access control for Collection %s in Catalog %s",
+            collection_id,
+            catalog_path,
+        )
+
+        # Retrive catalog to confirm owning workspace
+        collection = await self.database.find_collection(
+            catalog_path=catalog_path, collection_id=collection_id
+        )
+        owner = collection["access_control_owner"]
+
+        if workspace == "default_workspace":
+            catalog_path_list = catalog_path.split("/")
+            if catalog_path_list[0] == "user-datasets":
+                workspace = catalog_path_list[1]
+
+        if not owner == workspace:
+            raise HTTPException(
+                status_code=403,
+                detail="Workspace does not have access to this Collection",
+            )
+
+        # Generate workspace access bitstring for entry
+        access_list.append(workspace)
+        user_access_bitstring = create_bitstring(ids=access_list, is_public=is_public)
+
+        await self.database.update_collection_access_control(
+            catalog_path=catalog_path,
+            collection_id=collection_id,
+            access_control=user_access_bitstring,
+        )
+
+        logger.info(
+            f"Updated access for Collection {collection_id} in Catalog {catalog_path} to "
+            f"be {'public' if is_public else 'private'} with access for {access_list}"
+        )
+
     @overrides
     async def create_catalog(
         self,
@@ -2101,16 +2239,17 @@ class TransactionsClient(AsyncBaseTransactionsClient):
         workspace: str,
         catalog_path: Optional[str] = None,
         is_public: bool = False,
+        # access_list: List[str] = [],
         **kwargs,
     ) -> stac_types.Catalog:
         """Create a new catalog in the database.
 
         Args:
             catalog (stac_types.Catalog): The catalog to be created.
-            username_header (dict): X-Username header from the request.
             workspace (str): The workspace being used to create the catalog.
             catalog_path (Optional[str]): The path to the catalog to be created.
             is_public (bool): Whether the catalog is public or not.
+            access_list (List[str]): List of users who have access to the catalog.
             **kwargs: Additional keyword arguments.
 
         Returns:
@@ -2120,6 +2259,9 @@ class TransactionsClient(AsyncBaseTransactionsClient):
             ConflictError: If the catalog already exists.
         """
         logger.info("Creating catalog")
+
+        logger.info("INPUTS")
+        logger.info(workspace)
 
         # Handle case where no catalog is provided
         if not catalog:
@@ -2141,7 +2283,7 @@ class TransactionsClient(AsyncBaseTransactionsClient):
                 and catalog["id"] == workspace
             ):
                 username = workspace
-            # This workspace can then only write to the user-datasets/user-workspace sub-catalog
+            # This workspace can then only write to the user-datasets/<workspace> sub-catalog
             elif not catalog_path or not catalog_path_with_slash.startswith(
                 f"user-datasets/{workspace}/"
             ):
@@ -2152,7 +2294,7 @@ class TransactionsClient(AsyncBaseTransactionsClient):
 
         # Handle case where entry is not public but no username is provided, use catalog id instead
         if workspace == "default_workspace" and not is_public:
-            # Should only be used to create top-level workspace catalogs e.g. user-datasets/<workspace-name>
+            # Should only be used to create top-level workspace catalogs e.g. user-datasets/<workspace>
             catalog_path_list = catalog_path.split("/") if catalog_path else []
             if len(catalog_path_list) > 1 and catalog_path_list[0] == "user-datasets":
                 username = catalog_path_list[1]
@@ -2166,8 +2308,11 @@ class TransactionsClient(AsyncBaseTransactionsClient):
             # Used to add public data to catalogs
             username = ""
 
-        # Generate bitstring for entry
-        bitstring = "".join(create_bitstring(uid=username, is_public=is_public))
+        # Generate user access bitstring for entry
+        access_list = [username]
+        workspace_access_bitstring = create_bitstring(
+            ids=access_list, is_public=is_public
+        )
 
         catalog = self.database.catalog_serializer.stac_to_db(
             catalog=catalog, base_url=base_url
@@ -2176,7 +2321,10 @@ class TransactionsClient(AsyncBaseTransactionsClient):
             catalog_path=catalog_path, catalog=catalog, base_url=base_url
         )
         await self.database.create_catalog(
-            catalog_path=catalog_path, catalog=catalog, access_control=bitstring
+            catalog_path=catalog_path,
+            catalog=catalog,
+            owner=username,
+            access_control=workspace_access_bitstring,
         )
 
         # This catalog does not yet have any collections or sub-catalogs
@@ -2211,17 +2359,18 @@ class TransactionsClient(AsyncBaseTransactionsClient):
         logger.info("Updating catalog")
         base_url = str(kwargs["request"].base_url)
 
+        # Check the owner of the specified catalog
+        catalog = await self.database.find_catalog(catalog_path=catalog_path)
+        catalog_owner = catalog["access_control_owner"]
+
         # Confirm that the workspace provides correct access to the part of the catalogue to be altered
         # check kubernetes manifest for given workspace to confirm access
         # TODO: use Kubernetes API to confirm sub-catalog path access required for transaction
         # For now, if this is a user workspace, confirm the changes are being made to the user's own workspace sub-catalog
         # e.g. user-datasets/user-workspace/collection
         if workspace != "default_workspace":
-            catalog_path_with_slash = f"{catalog_path}/" if catalog_path else ""
-            # This workspace can only write to the user-datasets/user-workspace sub-catalog
-            if not catalog_path or not catalog_path_with_slash.startswith(
-                f"user-datasets/{workspace}/"
-            ):
+            # if not default_workspace, this is a user workspace
+            if workspace != catalog_owner:
                 raise HTTPException(
                     status_code=403,
                     detail=f"Workspace {workspace} does not have access to {catalog_path if catalog_path else 'top-level'} catalog",
@@ -2493,8 +2642,9 @@ class EsAsyncCollectionSearchClient(AsyncCollectionSearchClient):
 
             # Get access control array for each catalog
             try:
-                access_control = catalog["access_control"]
-                catalog.pop("access_control")
+                access_control = catalog["access_control_workspaces"]
+                catalog.pop("access_control_owner")
+                catalog.pop("access_control_workspaces")
                 # Check access control
                 if not int(access_control[-1]):  # Catalog is private
                     if username == "":
@@ -2547,8 +2697,10 @@ class EsAsyncCollectionSearchClient(AsyncCollectionSearchClient):
             limit = search_request.limit
 
         collections = []
-
+        count = 0
         while True:
+            logger.info("In for loop %s", count)
+            count += 1
             temp_collections, _, next_token, hit_tokens = (
                 await self.database.execute_collection_search(
                     search=search,
@@ -2566,8 +2718,9 @@ class EsAsyncCollectionSearchClient(AsyncCollectionSearchClient):
             ):
                 # Get access control array for this collection
                 try:
-                    access_control = collection["access_control"]
-                    collection.pop("access_control")
+                    access_control = collection["access_control_workspaces"]
+                    collection.pop("access_control_owner")
+                    collection.pop("access_control_workspaces")
                     # Append collection to list if user has access
                     if int(access_control[-1]) or int(access_control[user_index]):
                         collections.append(collection)
@@ -2721,7 +2874,10 @@ class EsAsyncDiscoverySearchClient(AsyncDiscoverySearchClient):
 
         catalogs_and_collections = []
 
+        count = 0
         while True:
+            logger.info("In for loop %s", count)
+            count += 1
             temp_catalogs_and_collections, _, next_token, hit_tokens = (
                 await self.database.execute_discovery_search(
                     search=search,
@@ -2739,8 +2895,9 @@ class EsAsyncDiscoverySearchClient(AsyncDiscoverySearchClient):
             ):
                 # Get access control array for this collection
                 try:
-                    access_control = data["access_control"]
-                    data.pop("access_control")
+                    access_control = data["access_control_workspaces"]
+                    data.pop("access_control_owner")
+                    data.pop("access_control_workspaces")
                     # Append collection to list if user has access
                     if int(access_control[-1]) or int(access_control[user_index]):
                         catalogs_and_collections.append(data)

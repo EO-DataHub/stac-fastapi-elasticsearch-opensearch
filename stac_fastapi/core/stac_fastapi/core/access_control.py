@@ -2,7 +2,7 @@ import hashlib
 import os
 
 # Set the size of the hash table
-NUMBER_OF_USERS = os.getenv("NUMBER_OF_USERS", 1024)  # Default to 1024 users
+NUMBER_OF_USERS = os.getenv("NUMBER_OF_USERS", 4096)  # Default to 1024 users
 
 
 def hash_to_index(
@@ -26,16 +26,12 @@ def set_bit(bitstring, index, allow=True):
         bitstring[index] = 0
 
 
-def create_bitstring(uid, gids=[], is_public=False):
+def create_bitstring(ids=[], is_public=False) -> str:
     bitstring_size = NUMBER_OF_USERS
     bitstring = [0] * bitstring_size
-    # Handle user access bit
-    if uid:
-        index = hash_to_index(uid)
-        set_bit(bitstring, index)
-    # Handle group access bits
-    for gid in gids:
-        index = hash_to_index(gid)
+    # Handle user access bits
+    for id in ids:
+        index = hash_to_index(id)
         set_bit(bitstring, index)
     # Set the fully-public bit
     if is_public:

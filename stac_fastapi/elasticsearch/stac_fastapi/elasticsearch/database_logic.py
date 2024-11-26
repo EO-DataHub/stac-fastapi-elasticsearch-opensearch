@@ -517,7 +517,7 @@ async def delete_item_index(collection_id: str, catalog_path_list: List[str]):
     await client.close()
 
 
-async def delete_collection_index(catalog_path_list: List[str]):
+async def delete_collection_index_by_catalog(catalog_path_list: List[str]):
     """Delete the index for collections in a catalog, specifying the top-level catalog.
 
     Args:
@@ -527,7 +527,11 @@ async def delete_collection_index(catalog_path_list: List[str]):
     client = AsyncElasticsearchSettings().create_client
 
     name = index_collections_by_catalog_id(catalog_path_list=catalog_path_list)
+
+    # Need to include all subcatalogs as well
+    name = name.replace("collections_", "collections*_", 1)
     resolved = await client.indices.resolve_index(name=name)
+    logger.info("Deleting collection index %s", name)
     try:
         if "aliases" in resolved and resolved["aliases"]:
             [alias] = resolved["aliases"]
@@ -553,7 +557,9 @@ async def delete_catalog_index(catalog_path_list: List[str]):
     client = AsyncElasticsearchSettings().create_client
 
     name = index_catalogs_by_catalog_id(catalog_path_list=catalog_path_list)
+    name = name.replace("catalogs_", "catalogs*_", 1)
     resolved = await client.indices.resolve_index(name=name)
+    logger.info("Deleting index %s", name)
     try:
         if "aliases" in resolved and resolved["aliases"]:
             [alias] = resolved["aliases"]
@@ -568,6 +574,33 @@ async def delete_catalog_index(catalog_path_list: List[str]):
         raise NotFoundError(
             f"Catalog path {'/'.join(catalog_path_list)} does not have any associated catalogs."
         )
+
+
+async def delete_item_index_by_catalog(catalog_path_list: List[str]):
+    """Delete the index for items in a collection, specifying the catalog and top-level catalog.
+    Args:
+        collection_id (str): The ID of the collection whose items index will be deleted.
+        catalog_path (List[str]): The path for the catalog whose items index will be deleted.
+        super_catalog_id (str): The ID of the top-level catalog whose items index will be deleted.
+    """
+    client = AsyncElasticsearchSettings().create_client
+
+    # Index by catalog path, then replace the catalog index with the items index
+    name = index_catalogs_by_catalog_id(catalog_path_list=catalog_path_list).replace(
+        CATALOGS_INDEX_PREFIX, ITEMS_INDEX_PREFIX
+    )
+    name = name.replace(
+        "items_", f"items_*{GROUP_SEPARATOR}", 1
+    )  # ensure we are looking in collections that sit within the specified catalog
+    resolved = await client.indices.resolve_index(name=name)
+    logger.info("Deleting item index %s", name)
+    if "aliases" in resolved and resolved["aliases"]:
+        [alias] = resolved["aliases"]
+        await client.indices.delete_alias(index=alias["indices"], name=alias["name"])
+        await client.indices.delete(index=alias["indices"])
+    else:
+        await client.indices.delete(index=name)
+    await client.close()
 
 
 def mk_item_id(item_id: str, collection_id: str, catalog_path_list: List[str]):
@@ -926,16 +959,18 @@ class DatabaseLogic:
             sub_catalogs = []
             for catalog in sub_data_catalogs_and_collections[0]:
                 if catalog["_source"]:
-                    if int(catalog["_source"]["access_control"][-1]) or int(
-                        catalog["_source"]["access_control"][user_index]
+                    if int(catalog["_source"]["access_control_workspaces"][-1]) or int(
+                        catalog["_source"]["access_control_workspaces"][user_index]
                     ):
                         sub_catalogs.append(catalog["_source"])
             # Extract collections
             collections = []
             for collection in sub_data_catalogs_and_collections[1]:
                 if collection["_source"]:
-                    if int(collection["_source"]["access_control"][-1]) or int(
-                        collection["_source"]["access_control"][user_index]
+                    if int(
+                        collection["_source"]["access_control_workspaces"][-1]
+                    ) or int(
+                        collection["_source"]["access_control_workspaces"][user_index]
                     ):
                         collections.append(collection["_source"])
             catalogs.append(
@@ -1619,7 +1654,7 @@ class DatabaseLogic:
         if catalog_path:
             catalog_path_list = catalog_path.split("/")
             catalog_index = index_collections_by_catalog_id(catalog_path_list)
-            catalog_index = catalog_index.replace("collections_", "collections*_")
+            catalog_index = catalog_index.replace("collections_", "collections*_", 1)
         else:
             catalog_index = f"{COLLECTIONS_INDEX_PREFIX}*"
 
@@ -1995,30 +2030,29 @@ class DatabaseLogic:
 
         return self.collection_serializer.stac_to_db(collection, base_url)
 
+    def _combine_bitstrings(self, old_bitstring, new_bitstring):
+        old_bitstring_int = int(old_bitstring, 2)  # Convert binary string to integer
+        new_bitstring_int = int(new_bitstring, 2)  # Convert binary string to integer
+        new_bitstring_int = old_bitstring_int | new_bitstring_int
+
+        # Define the fixed length for the bitstrings
+        fixed_length = max(len(old_bitstring), len(new_bitstring))
+
+        new_bitstring = bin(new_bitstring_int)[2:].zfill(fixed_length)
+
+        return new_bitstring
+
     async def update_parent_access_control(
         self,
         catalog_path_list: List[str],
-        new_bitstring: str,
-        collection_id: Optional[str] = None,
+        new_workspaces_bitstring: str,
     ):
-        """Update the access control bitstring for the parent catalog."""
+        """Update the access control bitstring for the parent catalog(s)."""
         # Check if updating for collection or catalog
-        # Currently nesting collections is not supported
+        # Nesting collections is not supported
 
-        if collection_id:
-            # Get current bitstring
-            collection = await self.client.get(
-                index=index_collections_by_catalog_id(
-                    catalog_path_list=catalog_path_list
-                ),
-                id=collection_id,
-            )
-            return
-            # TODO: Get all other child collections for this collection and compute OR bitwise operation
-            # e.g. using self.get_collection_collections
-
-        elif len(catalog_path_list) > 1:
-            # Update the access control bitstring for the parent catalog
+        if len(catalog_path_list) > 1:
+            # Update the access control bitstring for the parent catalog(s)
             parent_catalog_path_list = catalog_path_list[:-1]
             catalog_id = catalog_path_list[-1]
             catalog = await self.client.get(
@@ -2027,32 +2061,24 @@ class DatabaseLogic:
                 ),
                 id=catalog_id,
             )
-            old_bitstring = catalog["_source"]["access_control"]
-            old_bitstring_int = int(
-                old_bitstring, 2
-            )  # Convert binary string to integer
-            new_bitstring_int = int(
-                new_bitstring, 2
-            )  # Convert binary string to integer
-            new_bitstring_int = old_bitstring_int | new_bitstring_int
+            old_workspaces_bitstring = catalog["_source"]["access_control_workspaces"]
+            new_workspaces_bitstring = self._combine_bitstrings(
+                old_workspaces_bitstring, new_workspaces_bitstring
+            )
 
-            # Define the fixed length for the bitstrings
-            fixed_length = max(len(old_bitstring), len(new_bitstring))
-
-            new_bitstring = bin(new_bitstring_int)[2:].zfill(fixed_length)
-
-            annotation = {"access_control": new_bitstring}
+            annotations = {"access_control_workspaces": new_workspaces_bitstring}
             _ = await self.client.update(
                 index=index_catalogs_by_catalog_id(
                     catalog_path_list=parent_catalog_path_list
                 ),
                 id=catalog_id,
-                body={"doc": annotation},
+                body={"doc": annotations},
                 refresh=True,
             )
 
             await self.update_parent_access_control(
-                catalog_path_list=catalog_path_list[:-1], new_bitstring=new_bitstring
+                catalog_path_list=catalog_path_list[:-1],
+                new_workspaces_bitstring=new_workspaces_bitstring,
             )
 
         elif len(catalog_path_list) == 1:
@@ -2062,26 +2088,17 @@ class DatabaseLogic:
                 index=ROOT_CATALOGS_INDEX,
                 id=catalog_id,
             )
+            old_workspaces_bitstring = catalog["_source"]["access_control_workspaces"]
+            new_workspaces_bitstring = self._combine_bitstrings(
+                old_workspaces_bitstring, new_workspaces_bitstring
+            )
 
-            old_bitstring = catalog["_source"]["access_control"]
-            old_bitstring_int = int(
-                old_bitstring, 2
-            )  # Convert binary string to integer
-            new_bitstring_int = int(
-                new_bitstring, 2
-            )  # Convert binary string to integer
-            new_bitstring_int = old_bitstring_int | new_bitstring_int
+            annotations = {"access_control_workspaces": new_workspaces_bitstring}
 
-            # Define the fixed length for the bitstrings
-            fixed_length = max(len(old_bitstring), len(new_bitstring))
-
-            new_bitstring = bin(new_bitstring_int)[2:].zfill(fixed_length)
-
-            annotation = {"access_control": new_bitstring}
             _ = await self.client.update(
                 index=ROOT_CATALOGS_INDEX,
                 id=catalog_id,
-                body={"doc": annotation},
+                body={"doc": annotations},
                 refresh=True,
             )
 
@@ -2089,6 +2106,7 @@ class DatabaseLogic:
         self,
         catalog_path: str,
         collection: Collection,
+        owner: str,
         access_control: str,
         refresh: bool = False,
     ):
@@ -2097,7 +2115,7 @@ class DatabaseLogic:
         Args:
             catalog_path (str): The parent catalog into which the Collection will be inserted.
             collection (Collection): The collection to be created.
-            access_control (int): Integer bitstring defining user access.
+            access_control (tuple): Tuple defining String bitstring defining data owner and workpace access
             refresh (bool, optional): Refresh the index after performing the operation. Defaults to False.
 
         Raises:
@@ -2121,11 +2139,15 @@ class DatabaseLogic:
         )
 
         # Record access control bitstring for this document
-        annotation = {"access_control": access_control}
+        # Record access control bitstring for this document
+        annotations = {
+            "access_control_owner": owner,
+            "access_control_workspaces": access_control,
+        }
         await self.client.update(
             index=index_collections_by_catalog_id(catalog_path_list=catalog_path_list),
             id=collection_id,
-            body={"doc": annotation},
+            body={"doc": annotations},
             refresh=refresh,
         )
 
@@ -2134,9 +2156,10 @@ class DatabaseLogic:
             id=collection_id,
         )
 
-        # Update the access control bitstring for the parent catalog
+        # Update the access control bitstring for the parent catalog(s)
         await self.update_parent_access_control(
-            catalog_path_list=catalog_path_list, new_bitstring=access_control
+            catalog_path_list=catalog_path_list,
+            new_workspaces_bitstring=(access_control),
         )
 
         collection = await self.client.get(
@@ -2147,6 +2170,39 @@ class DatabaseLogic:
         if (meta := es_resp.get("meta")) and meta.get("status") == 409:
             raise ConflictError(
                 f"Collection {collection_id} in Catalog {catalog_id} at {'path ' + '/'.join(catalog_path_list[:-1]) if len(catalog_path_list) > 1 else 'top-level'} already exists"
+            )
+
+    async def update_collection_access_control(
+        self,
+        collection_id: str,
+        catalog_path: str,
+        access_control: str,
+        refresh: bool = False,
+    ):
+        # Record access control bitstring for this document
+        if catalog_path:
+            # Create list of nested catalog ids
+            catalog_path_list = catalog_path.split("/")
+            index = index_collections_by_catalog_id(catalog_path_list=catalog_path_list)
+        else:
+            raise NotFoundError("Catalog path not provided")
+
+        annotations = {
+            "access_control_workspaces": access_control,
+        }
+
+        await self.client.update(
+            index=index,
+            id=collection_id,
+            refresh=refresh,
+            body={"doc": annotations},
+        )
+
+        # Update the access control bitstring for the parent catalog(s)
+        if catalog_path:
+            await self.update_parent_access_control(
+                catalog_path_list=catalog_path_list,
+                new_workspaces_bitstring=access_control,
             )
 
     async def find_collection(
@@ -2223,7 +2279,7 @@ class DatabaseLogic:
         )
 
         # Access current access control bitstring, as this will remain identical
-        access_control = current_collection["access_control"]
+        access_control = current_collection["access_control_workspaces"]
 
         if collection_id != collection["id"]:
             await self.create_collection(
@@ -2272,7 +2328,7 @@ class DatabaseLogic:
             )
 
             # Record access control bitstring for this document
-            annotation = {"access_control": access_control}
+            annotation = {"access_control_workspaces": access_control}
             await self.client.update(
                 index=index_collections_by_catalog_id(
                     catalog_path_list=catalog_path_list
@@ -2425,6 +2481,7 @@ class DatabaseLogic:
     async def create_catalog(
         self,
         catalog: Catalog,
+        owner: str,
         access_control: str,
         catalog_path: Optional[str] = None,
         refresh: bool = False,
@@ -2433,7 +2490,7 @@ class DatabaseLogic:
 
         Args:
             catalog (Catalog): The Catalog object to be created.
-            access_control (str): String bitstring defining user access.
+            access_control (tuple): Tuple defining String bitstring defining data owner and workpace access
             catalog_path (Optional[str]): The path to the parent catalog into which the new catalog will be inserted. Default is None.
             refresh (bool, optional): Whether to refresh the index after the creation. Default is False.
 
@@ -2466,12 +2523,16 @@ class DatabaseLogic:
         )
 
         # Record access control bitstring for this document
-        annotation = {"access_control": access_control}
+        annotations = {
+            "access_control_owner": owner,
+            "access_control_workspaces": access_control,
+        }
+
         await self.client.update(
             index=index,
             id=catalog_id,
             refresh=refresh,
-            body={"doc": annotation},
+            body={"doc": annotations},
         )
 
         catalog = await self.client.get(
@@ -2482,13 +2543,46 @@ class DatabaseLogic:
         # Update the access control bitstring for the parent catalog
         if catalog_path:
             await self.update_parent_access_control(
-                catalog_path_list=catalog_path_list, new_bitstring=access_control
+                catalog_path_list=catalog_path_list,
+                new_workspaces_bitstring=(access_control),
             )
 
-        catalog = await self.client.get(
+    async def update_catalog_access_control(
+        self,
+        catalog_path: str,
+        access_control: str,
+        refresh: bool = False,
+    ):
+        # Record access control bitstring for this document
+        catalog_path_list = catalog_path.split("/")
+        catalog_id = catalog_path_list[-1]
+        if len(catalog_path_list) > 1:
+            # Generate parent catalog path as list
+            parent_catalog_path_list = catalog_path_list[:-1]
+            index = index_catalogs_by_catalog_id(
+                catalog_path_list=parent_catalog_path_list
+            )
+        else:
+            # Set to root catalogs index
+            index = ROOT_CATALOGS_INDEX
+
+        annotations = {
+            "access_control_workspaces": access_control,
+        }
+
+        await self.client.update(
             index=index,
             id=catalog_id,
+            refresh=refresh,
+            body={"doc": annotations},
         )
+
+        # Update the access control bitstring for the parent catalog(s)
+        if catalog_path:
+            await self.update_parent_access_control(
+                catalog_path_list=catalog_path_list,
+                new_workspaces_bitstring=access_control,
+            )
 
     async def find_catalog(self, catalog_path: str) -> Catalog:
         """Find and return a catalog from the database.
@@ -2902,60 +2996,34 @@ class DatabaseLogic:
         else:
             index = ROOT_CATALOGS_INDEX
 
+        logger.info("Deleting catalog %s in index %s", catalog_id, index)
+
         await self.client.delete(index=index, id=catalog_id, refresh=refresh)
-        # Need to delete all catalogs contained in this catalog
-        index_param = index_catalogs_by_catalog_id(catalog_path_list=catalog_path_list)
-        try:
-            response = await self.client.search(
-                index=index_param,
-                body={"sort": [{"id": {"order": "asc"}}]},
-            )
-            # Delete each catalog recursively
-            await asyncio.gather(
-                *[
-                    self.delete_catalog(catalog_path=f"{catalog_path}/{hit['_id']}")
-                    for hit in response["hits"]["hits"]
-                ],
-                return_exceptions=True,
-            )
-        except exceptions.NotFoundError:
-            logger.info(
-                f"Catalog {catalog_id} at {'path ' + '/'.join(catalog_path_list[:-1]) if len(catalog_path_list) > 1 else 'top-level'} has no catalogs, so index does not exist and cannot be deleted, continuing as normal."
-            )
 
-        # Need to delete all collections contained in this catalog
-        index_param = collection_indices(catalog_paths=[catalog_path_list])
-        try:
-            response = await self.client.search(
-                index=index_param,
-                body={"sort": [{"id": {"order": "asc"}}]},
-            )
-            collection_ids = [hit["_id"] for hit in response["hits"]["hits"]]
-            await asyncio.gather(
-                *[
-                    delete_item_index(
-                        collection_id=collection_id, catalog_path_list=catalog_path_list
-                    )
-                    for collection_id in collection_ids
-                ],
-                return_exceptions=True,
-            )
-        except exceptions.NotFoundError:
-            logger.info(
-                f"Some collection at path {catalog_path} has no items, so index does not exist and cannot be deleted, continuing as normal."
-            )
-
-        try:
-            await delete_collection_index(catalog_path_list=catalog_path_list)
-        except exceptions.NotFoundError:
-            logger.info(
-                f"Catalog {catalog_id} at {'path ' + '/'.join(catalog_path_list[:-1]) if len(catalog_path_list) > 1 else 'top-level'} has no collections, so index does not exist and cannot be deleted, continuing as normal."
-            )
+        # Remove index for catalogs in this index
         try:
             await delete_catalog_index(catalog_path_list=catalog_path_list)
-        except exceptions.NotFoundError:
-            logger.info(
-                f"Catalog {catalog_id} at {'path ' + '/'.join(catalog_path_list[:-1]) if len(catalog_path_list) > 1 else 'top-level'} has no catalogs, so index does not exist and cannot be deleted, continuing as normal."
+        except NotFoundError:
+            logger.warning(
+                f"Catalog {catalog_id} at {'path ' + '/'.join(catalog_path_list[:-1]) if len(catalog_path_list) > 1 else 'top-level'} has no subcatalogs, so index does not exist and cannot be deleted, continuing as normal."
+            )
+
+        # Remove index for collections in this index
+        try:
+            await delete_collection_index_by_catalog(
+                catalog_path_list=catalog_path_list
+            )
+        except NotFoundError:
+            logger.warning(
+                f"Catalog {catalog_id} at {'path ' + '/'.join(catalog_path_list[:-1]) if len(catalog_path_list) > 1 else 'top-level'} has no collections, so index does not exist and cannot be deleted, continuing as normal."
+            )
+
+        # Remove index for items in this index
+        try:
+            await delete_item_index_by_catalog(catalog_path_list=catalog_path_list)
+        except NotFoundError:
+            logger.warning(
+                f"Catalog {catalog_id} at {'path ' + '/'.join(catalog_path_list[:-1]) if len(catalog_path_list) > 1 else 'top-level'} has no items, so index does not exist and cannot be deleted, continuing as normal."
             )
 
     async def bulk_async(

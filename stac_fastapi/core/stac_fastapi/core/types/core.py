@@ -200,6 +200,58 @@ class AsyncBaseTransactionsClient(abc.ABC):
         ...
 
     @abc.abstractmethod
+    async def update_catalog_access_control(
+        self,
+        workspace: str,
+        catalog_path: Optional[str] = None,
+        is_public: bool = False,
+        access_list: List[str] = [],
+    ):
+        """Perform a complete update on an the access control for the given catalog.
+
+        Called with `PUT /catalogs/{catalog_path}`. This catalog must exist and this endpoint
+        Only updates the access control details for this catalog, either public or private or with a list of allowed workspaces,
+        no other changes.
+
+        Args:
+            workspace: the workspace that is requesting to make the change
+            catalog_path: the path to the catalog to be updated
+            is_public: whether the catalog is public
+            access_list: list of workspaces that have access to the catalog
+
+        Returns:
+            N/A
+        """
+        ...
+
+    @abc.abstractmethod
+    async def update_collection_access_control(
+        self,
+        workspace: str,
+        collection_id: str,
+        catalog_path: Optional[str] = None,
+        is_public: bool = False,
+        access_list: List[str] = [],
+    ):
+        """Perform a complete update on an the access control for the given collection.
+
+        Called with `PUT /catalogs/{catalog_path}/collections/{collection_id}`. This collection must exist and this endpoint.
+        Only updates the access control details for this collection, either public or private or with a list of allowed workspaces,
+        no other changes.
+
+        Args:
+            workspace: the workspace that is requesting to make the change
+            collection_id: the id of the collection to be updated
+            catalog_path: the path to the catalog to be updated
+            is_public: whether the catalog is public
+            access_list: list of workspaces that have access to the catalog
+
+        Returns:
+            N/A
+        """
+        ...
+
+    @abc.abstractmethod
     async def delete_catalog(
         self, catalog_path: str, workspace: str, **kwargs
     ) -> Optional[stac_types.Catalog | Response]:
