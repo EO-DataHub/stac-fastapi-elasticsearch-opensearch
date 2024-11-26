@@ -8,6 +8,10 @@ and this project adheres to [Semantic Versioning](http://semver.org/spec/v2.0.0.
 ## EODHP
 The following changes have been made for the EODHP project
 
+### v0.3.12 - 2024-11-01
+Bugfix - remove collection and item indexes when catalog is removed
+
+
 ### v0.3.11 - 2024-10-07
 Bugfix - handle entries with missing access control, sometimes seen during debugging
 
