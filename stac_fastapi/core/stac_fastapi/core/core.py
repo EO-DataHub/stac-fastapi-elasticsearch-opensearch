@@ -507,13 +507,26 @@ class CoreClient(AsyncBaseCoreClient):
                 break
             token = next_token
 
+        if catalog_path:
+            catalog_url = f"catalogs/{catalog_path}"
+        else:
+            catalog_url = ""
+
         links = [
-            {"rel": Relations.root.value, "type": MimeTypes.json, "href": base_url},
-            {"rel": Relations.parent.value, "type": MimeTypes.json, "href": base_url},
+            {
+                "rel": Relations.root.value,
+                "type": MimeTypes.json,
+                "href": urljoin(base_url, catalog_url),
+            },
+            {
+                "rel": Relations.parent.value,
+                "type": MimeTypes.json,
+                "href": urljoin(base_url, catalog_url),
+            },
             {
                 "rel": Relations.self.value,
                 "type": MimeTypes.json,
-                "href": urljoin(base_url, "catalogs"),
+                "href": f"{urljoin(base_url, catalog_url)}catalogs",
             },
         ]
 
@@ -2587,9 +2600,32 @@ class EsAsyncCollectionSearchClient(AsyncCollectionSearchClient):
                 break
             token = next_token
 
-        links = []
+        if catalog_path:
+            catalog_url = f"catalogs/{catalog_path}"
+        else:
+            catalog_url = ""
+
+        links = [
+            {
+                "rel": Relations.root.value,
+                "type": MimeTypes.json,
+                "href": urljoin(base_url, catalog_url),
+            },
+            {
+                "rel": Relations.parent.value,
+                "type": MimeTypes.json,
+                "href": urljoin(base_url, catalog_url),
+            },
+            {
+                "rel": Relations.self.value,
+                "type": MimeTypes.json,
+                "href": f"{urljoin(base_url, catalog_url)}collections",
+            },
+        ]
+
         if next_token:
-            links = await PagingLinks(request=request, next=next_token).get_links()
+            next_link = PagingLinks(next=next_token, request=request).link_next()
+            links.append(next_link)
 
         return Collections(collections=collections, links=links)
 
