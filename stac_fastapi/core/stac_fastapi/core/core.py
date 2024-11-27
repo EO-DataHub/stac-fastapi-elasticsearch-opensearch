@@ -212,9 +212,7 @@ class CoreClient(AsyncBaseCoreClient):
 
         catalogs = []
 
-        temp_catalogs = await self.database.get_catalog_subcatalogs(
-            base_url=base_url
-        )
+        temp_catalogs = await self.database.get_catalog_subcatalogs(base_url=base_url)
 
         for catalog in temp_catalogs:
             # Get access control array for each catalog

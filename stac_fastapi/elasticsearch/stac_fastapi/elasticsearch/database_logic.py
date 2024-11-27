@@ -2578,8 +2578,9 @@ class DatabaseLogic:
                 body={"doc": annotations},
             )
             new_catalog_path = f"{catalog_path}/{catalog_id}"
-            await self.update_child_access_control(new_catalog_path, access_control, refresh)
-        
+            await self.update_child_access_control(
+                new_catalog_path, access_control, refresh
+            )
 
         if col_index:
             # Update access control for nested collections
