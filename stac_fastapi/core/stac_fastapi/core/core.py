@@ -650,7 +650,7 @@ class CoreClient(AsyncBaseCoreClient):
                 )
 
         # Assume at most 100 collections in a catalog for the time being, may need to increase
-        collections, _, _ = await self.database.get_catalog_collections(
+        collections = await self.database.get_catalog_collections(
             catalog_path=catalog_path,
             base_url=base_url,
             limit=NUMBER_OF_CATALOG_COLLECTIONS,
@@ -662,7 +662,7 @@ class CoreClient(AsyncBaseCoreClient):
             # Get access control array for each collection
             try:
                 access_control = collection["access_control_workspaces"]
-                catalog.pop("access_control_owner")
+                collection.pop("access_control_owner")
                 collection.pop("access_control_workspaces")
                 # Remove collection from list if user does not have access
                 if not int(access_control[-1]) and not int(access_control[user_index]):

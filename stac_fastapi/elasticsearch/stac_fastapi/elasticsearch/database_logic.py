@@ -774,63 +774,31 @@ class DatabaseLogic:
 
         # Create list of nested catalog ids
         catalog_path_list = catalog_path.split("/")
-
-        search_after = None
-        if token:
-            search_after = [token]
-
-        # Logic to ensure next token only returned when further results are available
-        max_result_window = stac_fastapi.types.search.Limit.le
-        size_limit = min(limit + 1, max_result_window)
-
+        index_param = index_collections_by_catalog_id(
+            catalog_path_list=catalog_path_list
+        )
         await self.check_catalog_exists(catalog_path_list=catalog_path_list)
 
-        index_param = collection_indices(catalog_paths=[catalog_path_list])
-
+        # Get all catalogs in this index
+        query = {"query": {"match_all": {}}}
         try:
             response = await self.client.search(
-                index=index_param,
-                body={
-                    "sort": [{"id": {"order": "asc"}}],
-                    "size": size_limit,
-                    "search_after": search_after,
-                },
+                index=index_param, body=query, size=NUMBER_OF_CATALOG_COLLECTIONS
             )
-        except exceptions.NotFoundError:
-            # No collections underneath this catalog
-            response = None
-            collections = []
-            hits = []
-            hit_tokens = []
-
-        if response:
-            collections = []
-            hit_tokens = []
             hits = response["hits"]["hits"]
-            for hit in hits:
-                catalog_path = hit["_index"].split("_", 1)[1]
-                catalog_path_list = catalog_path.split(CATALOG_SEPARATOR)
-                catalog_path_list.reverse()
-                catalog_path = "/".join(catalog_path_list)
-                collections.append(
-                    self.collection_serializer.db_to_stac(
-                        collection=hit["_source"],
-                        base_url=base_url,
-                        catalog_path=catalog_path,
-                    )
+
+            collections = [
+                self.collection_serializer.db_to_stac(
+                    catalog_path=catalog_path,
+                    collection=hit["_source"],
+                    base_url=base_url,
                 )
-                if hit.get("sort"):
-                    hit_token = hit["sort"][0]
-                    hit_tokens.append(hit_token)
-                else:
-                    hit_tokens.append(None)
+                for hit in hits
+            ]
+        except exceptions.NotFoundError:
+            collections = []
 
-        next_token = None
-        if len(hits) > limit and limit < max_result_window:
-            if hits and (hits[limit - 1].get("sort")):
-                next_token = hits[limit - 1]["sort"][0]
-
-        return collections, next_token, hit_tokens
+        return collections
 
     async def get_all_catalogs(
         self,
@@ -2123,6 +2091,7 @@ class DatabaseLogic:
             "access_control_owner": owner,
             "access_control_workspaces": access_control,
         }
+        print(annotations)
         await self.client.update(
             index=index_collections_by_catalog_id(catalog_path_list=catalog_path_list),
             id=collection_id,
