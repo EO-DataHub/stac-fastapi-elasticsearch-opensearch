@@ -212,28 +212,20 @@ class CoreClient(AsyncBaseCoreClient):
 
         catalogs = []
 
-        count = 0
-        while True:
-            logger.info("In for loop %s", count)
-            count += 1
-            temp_catalogs, next_token = await self.database.get_catalog_subcatalogs(
-                token=None, limit=NUMBER_OF_CATALOG_COLLECTIONS, base_url=base_url
-            )
+        temp_catalogs = await self.database.get_catalog_subcatalogs(
+            base_url=base_url
+        )
 
-            for catalog in temp_catalogs:
-                # Get access control array for each catalog
-                try:
-                    access_control = catalog["access_control_workspaces"]
-                    # Append catalog to list if user has access
-                    # Convert to int to ensure 0 is falsy and 1 is truthy
-                    if int(access_control[-1]) or int(access_control[user_index]):
-                        catalogs.append(catalog)
-                except KeyError:
-                    logger.error(f"No access control found for catalog {catalog['id']}")
-
-            # If catalogs now less than limit, will need to run search again, giving next_token
-            if len(catalogs) >= NUMBER_OF_CATALOG_COLLECTIONS or not next_token:
-                break
+        for catalog in temp_catalogs:
+            # Get access control array for each catalog
+            try:
+                access_control = catalog["access_control_workspaces"]
+                # Append catalog to list if user has access
+                # Convert to int to ensure 0 is falsy and 1 is truthy
+                if int(access_control[-1]) or int(access_control[user_index]):
+                    catalogs.append(catalog)
+            except KeyError:
+                logger.error(f"No access control found for catalog {catalog['id']}")
 
         for catalog in catalogs:
             landing_page["links"].append(
@@ -683,11 +675,9 @@ class CoreClient(AsyncBaseCoreClient):
                 )
                 collections.remove(collection)
 
-        sub_catalogs, _ = await self.database.get_catalog_subcatalogs(
+        sub_catalogs = await self.database.get_catalog_subcatalogs(
             catalog_path=catalog_path,
             base_url=base_url,
-            limit=NUMBER_OF_CATALOG_COLLECTIONS,
-            token=None,
         )
 
         # Check if current user has access to each collection

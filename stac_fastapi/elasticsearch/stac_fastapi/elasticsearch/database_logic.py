@@ -30,7 +30,9 @@ logger = logging.getLogger(__name__)
 
 NumType = Union[float, int]
 
-NUMBER_OF_CATALOG_COLLECTIONS = os.getenv("NUMBER_OF_CATALOG_COLLECTIONS", 100)
+NUMBER_OF_CATALOG_COLLECTIONS = os.getenv(
+    "NUMBER_OF_CATALOG_COLLECTIONS", stac_fastapi.types.search.Limit.le
+)
 
 CATALOG_SEPARATOR = os.getenv(
     "CATALOG_SEPARATOR", "____"
@@ -998,16 +1000,12 @@ class DatabaseLogic:
 
     async def get_catalog_subcatalogs(
         self,
-        token: Optional[str],
-        limit: int,
         base_url: str,
         catalog_path: Optional[str] = None,
     ) -> Tuple[List[Dict[str, Any]], Optional[str]]:
         """Retrieve a list of all catalogs in a catalog from Elasticsearch, supporting pagination.
 
         Args:
-            token (Optional[str]): The pagination token.
-            limit (int): The number of results to return.
             base_url (str): The base URL used to create the item's self URL.
             catalog_path (Optional[str]): The parent catalog in which to search (search all top-level catalogs if blank).
 
@@ -1031,30 +1029,14 @@ class DatabaseLogic:
             index_param = ROOT_CATALOGS_INDEX
             parent_catalog_path = None
 
-        search_after = None
-        if token:
-            search_after = [token]
-
-        # Logic to ensure next token only returned when further results are available
-        max_result_window = stac_fastapi.types.search.Limit.le
-        size_limit = min(limit + 1, max_result_window)
-
+        # Get all catalogs in this index
+        query = {"query": {"match_all": {}}}
         try:
             response = await self.client.search(
-                index=index_param,
-                body={
-                    # "sort": [{"id": {"order": "asc"}}],
-                    "size": size_limit,
-                    "search_after": search_after,
-                },
+                index=index_param, body=query, size=NUMBER_OF_CATALOG_COLLECTIONS
             )
-        except exceptions.NotFoundError:
-            response = None
-            catalogs = []
-            hits = []
-
-        if response:
             hits = response["hits"]["hits"]
+
             catalogs = [
                 self.catalog_serializer.db_to_stac(
                     catalog_path=parent_catalog_path,
@@ -1063,13 +1045,10 @@ class DatabaseLogic:
                 )
                 for hit in hits
             ]
+        except exceptions.NotFoundError:
+            catalogs = []
 
-        next_token = None
-        if len(hits) > limit and limit < max_result_window:
-            if hits and (hits[limit - 1].get("sort")):
-                next_token = hits[limit - 1]["sort"][0]
-
-        return catalogs, next_token
+        return catalogs
 
     async def get_one_item(
         self, catalog_path: str, collection_id: str, item_id: str
@@ -2547,6 +2526,79 @@ class DatabaseLogic:
                 new_workspaces_bitstring=(access_control),
             )
 
+    async def update_child_access_control(
+        self,
+        catalog_path: str,
+        access_control: str,
+        refresh: bool = False,
+    ):
+        """
+        Update all child catalogs and collections to have the same access control as the parent catalog.
+        This sets the recursive access control for all child catalogs and collections. This is then overwritten for any
+        child catalog or collection that has its own access control.
+        """
+        # Get all subcatalogs for given path
+        catalog_path_list = catalog_path.split("/")
+        if len(catalog_path_list) > 1:
+            # Generate parent catalog path as list
+            cat_index = index_catalogs_by_catalog_id(
+                catalog_path_list=catalog_path_list
+            )
+            col_index = index_collections_by_catalog_id(
+                catalog_path_list=catalog_path_list
+            )
+        else:
+            # Set to root catalogs index
+            cat_index = ROOT_CATALOGS_INDEX
+            col_index = None  # no collections at top-level
+
+        annotations = {
+            "access_control_workspaces": access_control,
+        }
+
+        # Get all documents in the chosen index
+        query = {
+            "_source": False,  # Do not retrieve the _source field
+            "query": {"match_all": {}},
+        }
+
+        try:
+            response = await self.client.search(
+                index=cat_index, body=query, size=NUMBER_OF_CATALOG_COLLECTIONS
+            )
+            sub_catalogs_ids = [doc["_id"] for doc in response["hits"]["hits"]]
+        except exceptions.NotFoundError:
+            sub_catalogs_ids = []
+
+        for catalog_id in sub_catalogs_ids:
+            await self.client.update(
+                index=cat_index,
+                id=catalog_id,
+                refresh=refresh,
+                body={"doc": annotations},
+            )
+            new_catalog_path = f"{catalog_path}/{catalog_id}"
+            await self.update_child_access_control(new_catalog_path, access_control, refresh)
+        
+
+        if col_index:
+            # Update access control for nested collections
+            try:
+                response = await self.client.search(
+                    index=col_index, body=query, size=NUMBER_OF_CATALOG_COLLECTIONS
+                )
+                collection_ids = [doc["_id"] for doc in response["hits"]["hits"]]
+            except exceptions.NotFoundError:
+                collection_ids = []
+
+            for collection_id in collection_ids:
+                await self.client.update(
+                    index=col_index,
+                    id=collection_id,
+                    refresh=refresh,
+                    body={"doc": annotations},
+                )
+
     async def update_catalog_access_control(
         self,
         catalog_path: str,
@@ -2583,6 +2635,8 @@ class DatabaseLogic:
                 catalog_path_list=catalog_path_list,
                 new_workspaces_bitstring=access_control,
             )
+        # Update recursive access for nested catalogs
+        await self.update_child_access_control(catalog_path, access_control, refresh)
 
     async def find_catalog(self, catalog_path: str) -> Catalog:
         """Find and return a catalog from the database.
