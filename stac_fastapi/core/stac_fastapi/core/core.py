@@ -1763,25 +1763,21 @@ class TransactionsClient(AsyncBaseTransactionsClient):
 
         base_url = str(kwargs["request"].base_url)
 
-        # Confirm that the workspace provides correct access to the part of the catalogue to be altered
-        # check kubernetes manifest for given workspace to confirm access
-        # TODO: use Kubernetes API to confirm sub-catalog path access required for transaction
-        # For now, if this is a user workspace, confirm the changes are being made to the user's own workspace sub-catalog
-        # e.g. user-datasets/user-workspace/collection
-        if workspace != "default_workspace":
-            catalog_path_with_slash = f"{catalog_path}/" if catalog_path else ""
-            # This workspace can only write to the user-datasets/user-workspace sub-catalog
-            if not catalog_path or not catalog_path_with_slash.startswith(
-                f"user-datasets/{workspace}/"
-            ):
-                raise HTTPException(
-                    status_code=403,
-                    detail=f"Workspace {workspace} does not have access to {catalog_path if catalog_path else 'top-level'} catalog",
-                )
+        # Confirm user has access to parent collection
+        # Retrieve catalog to confirm owning workspace
+        collection = await self.database.find_collection(
+            collection_id=collection_id, catalog_path=catalog_path
+        )
+        owner = collection["access_control_owner"]
+
+        if owner != workspace:
+            raise HTTPException(
+                status_code=403, detail="Workspace does not have access to the parent Collection"
+            )
 
         if collection_id != item["collection"]:
             raise Exception(
-                f"The provided collection id and that found in the item do not match: {collection_id}, {item['collection']}"
+                f"The provided collection id and that found in the item do not match: {collection_id} : {item['collection']}"
             )
 
         # If a feature collection is posted
@@ -1849,19 +1845,13 @@ class TransactionsClient(AsyncBaseTransactionsClient):
         collection_owner = collection["access_control_owner"]
 
         # Confirm that the workspace provides correct access to the part of the catalogue to be altered
-        # check kubernetes manifest for given workspace to confirm access
-        # TODO: use Kubernetes API to confirm sub-catalog path access required for transaction
-        # For now, if this is a user workspace, confirm the changes are being made to the user's own workspace sub-catalog
-        # e.g. user-datasets/user-workspace/collection
-        if workspace != "default_workspace":
-            # if not default_workspace, this is a user workspace
-            if workspace != collection_owner:
-                raise HTTPException(
-                    status_code=403,
-                    detail=f"Workspace {workspace} does not have access to parent Collection {collection_id} at {catalog_path if catalog_path else 'top-level'} catalog",
-                )
+        if workspace != collection_owner:
+            raise HTTPException(
+                status_code=403,
+                detail=f"Workspace {workspace} does not have access to parent Collection {collection_id} at {catalog_path if catalog_path else 'top-level'} catalog",
+            )
 
-        # Note, if the provided item is not valid stac, this may delete the item and them fail to create the new one
+        # Note, if the provided item is not valid stac, this may delete the item and then fail to create the new one
 
         await self.database.check_collection_exists(
             collection_id=collection_id, catalog_path=catalog_path
@@ -1904,21 +1894,18 @@ class TransactionsClient(AsyncBaseTransactionsClient):
         """
         logger.info("Deleting item")
 
-        # Confirm that the workspace provides correct access to the part of the catalogue to be altered
-        # check kubernetes manifest for given workspace to confirm access
-        # TODO: use Kubernetes API to confirm sub-catalog path access required for transaction
-        # For now, if this is a user workspace, confirm the changes are being made to the user's own workspace sub-catalog
-        # e.g. user-datasets/user-workspace/collection
-        if workspace != "default_workspace":
-            catalog_path_with_slash = f"{catalog_path}/" if catalog_path else ""
-            # This workspace can only write to the user-datasets/user-workspace sub-catalog
-            if not catalog_path or not catalog_path_with_slash.startswith(
-                f"user-datasets/{workspace}/"
-            ):
-                raise HTTPException(
-                    status_code=403,
-                    detail=f"Workspace {workspace} does not have access to {catalog_path if catalog_path else 'top-level'} catalog",
-                )
+        # Confirm user has access to this part of the catalog
+        # Retrive collection to confirm owning workspace
+        collection = await self.database.find_collection(
+            catalog_path=catalog_path, collection_id=collection_id
+        )
+        owner = collection["access_control_owner"]
+
+        if owner != workspace:
+            raise HTTPException(
+                status_code=403,
+                detail="Workspace does not have access to the parent Collection"
+            )
 
         await self.database.delete_item(
             item_id=item_id, collection_id=collection_id, catalog_path=catalog_path
@@ -1931,8 +1918,6 @@ class TransactionsClient(AsyncBaseTransactionsClient):
         catalog_path: str,
         collection: stac_types.Collection,
         workspace: str,
-        is_public: bool = False,
-        # access_list: List[str] = [],
         **kwargs,
     ) -> stac_types.Collection:
         """Create a new collection in the database.
@@ -1956,42 +1941,38 @@ class TransactionsClient(AsyncBaseTransactionsClient):
         # Handle case where no collection is provided
         if not collection:
             raise HTTPException(status_code=400, detail="No collection provided")
+        
+        # Only default workspace can alter top-level catalogs
+        if not catalog_path and workspace != "default_workspace":
+            HTTPException(
+                status_code=403,
+                detail=f"Workspace does not have access to top-level catalog",
+            )
+
+        # Determine public setting
+        if workspace == "default_workspace":
+            is_public = True
+        else:
+            is_public = False
 
         base_url = str(kwargs["request"].base_url)
 
-        # Confirm that the workspace provides correct access to the part of the catalogue to be altered
-        # check kubernetes manifest for given workspace to confirm access
-        # TODO: use Kubernetes API to confirm sub-catalog path access required for transaction
-        # For now, if this is a user workspace, confirm the changes are being made to the user's own workspace sub-catalog
-        # e.g. user-datasets/user-workspace/collection
-        if workspace != "default_workspace":
-            catalog_path_with_slash = f"{catalog_path}/" if catalog_path else ""
-            # This workspace can only write to the user-datasets/user-workspace sub-catalog
-            if not catalog_path or not catalog_path_with_slash.startswith(
-                f"user-datasets/{workspace}/"
-            ):
-                raise HTTPException(
-                    status_code=403,
-                    detail=f"Workspace {workspace} does not have access to {catalog_path if catalog_path else 'top-level'} catalog",
-                )
+        # Confirm user has access to parent catalog
+        # Retrive catalog to confirm owning workspace
+        catalog = await self.database.find_catalog(catalog_path=catalog_path)
+        owner = catalog["access_control_owner"]
+        # Set to private for the minute, in future this should take the parent access, but there are complexities here
+        # e.g. as access to a collection implies access to a parent, there could be cross-permissions that are
+        # not desired by the users creating new collections
+        # access_control = catalog["access_control_workspaces"]
 
-        # Handle case where entry is not public, use catalog id instead
-        if workspace == "default_workspace" and not is_public:
-            # Should only be used to create top-level workspace catalogs e.g. user-datasets/<workspace-name>
-            catalog_path_list = catalog_path.split("/")
-            if catalog_path_list[0] == "user-datasets":
-                username = catalog_path_list[1]
-            else:
-                raise HTTPException(
-                    status_code=400, detail="Username not provided for private entry"
-                )
-        elif not is_public:
-            username = workspace
-        else:
-            username = ""
+        if owner != workspace:
+            raise HTTPException(
+                status_code=403, detail="Workspace does not have access to this Catalog"
+            )
 
         # Generate user access bitstring for entry
-        access_list = [username]
+        access_list = [workspace]
         workspace_access_bitstring = create_bitstring(
             ids=access_list, is_public=is_public
         )
@@ -2005,7 +1986,7 @@ class TransactionsClient(AsyncBaseTransactionsClient):
         await self.database.create_collection(
             catalog_path=catalog_path,
             collection=collection,
-            owner=username,
+            owner=workspace,
             access_control=workspace_access_bitstring,
         )
         return CollectionSerializer.db_to_stac(
@@ -2043,23 +2024,19 @@ class TransactionsClient(AsyncBaseTransactionsClient):
         base_url = str(kwargs["request"].base_url)
 
         # Check the owner of the specified collection
-        collection = await self.database.find_collection(
+        old_collection = await self.database.find_collection(
             collection_id=collection_id, catalog_path=catalog_path
         )
-        collection_owner = collection["access_control_owner"]
+        collection_owner = old_collection["access_control_owner"]
+        access_control = old_collection["access_control_workspaces"]
 
         # Confirm that the workspace provides correct access to the part of the catalogue to be altered
-        # check kubernetes manifest for given workspace to confirm access
-        # TODO: use Kubernetes API to confirm sub-catalog path access required for transaction
-        # For now, if this is a user workspace, confirm the changes are being made to the user's own workspace sub-catalog
-        # e.g. user-datasets/user-workspace/collection
-        if workspace != "default_workspace":
-            # if not default_workspace, this is a user workspace
-            if workspace != collection_owner:
-                raise HTTPException(
-                    status_code=403,
-                    detail=f"Workspace {workspace} does not have access to {catalog_path if catalog_path else 'top-level'} catalog",
-                )
+        if workspace != collection_owner:
+            raise HTTPException(
+                status_code=403,
+                detail=f"Workspace {workspace} does not have access to {catalog_path if catalog_path else 'top-level'} catalog",
+            )
+        owner = collection_owner
 
         collection = self.database.collection_serializer.stac_to_db(
             collection, base_url
@@ -2068,6 +2045,8 @@ class TransactionsClient(AsyncBaseTransactionsClient):
             catalog_path=catalog_path,
             collection_id=collection_id,
             collection=collection,
+            owner=owner,
+            access_control=access_control,
         )
 
         return CollectionSerializer.db_to_stac(
@@ -2097,21 +2076,17 @@ class TransactionsClient(AsyncBaseTransactionsClient):
         """
         logger.info("Deleting collection")
 
-        # Confirm that the workspace provides correct access to the part of the catalogue to be altered
-        # check kubernetes manifest for given workspace to confirm access
-        # TODO: use Kubernetes API to confirm sub-catalog path access required for transaction
-        # For now, if this is a user workspace, confirm the changes are being made to the user's own workspace sub-catalog
-        # e.g. user-datasets/user-workspace/collection
-        if workspace != "default_workspace":
-            catalog_path_with_slash = f"{catalog_path}/" if catalog_path else ""
-            # This workspace can only write to the user-datasets/user-workspace sub-catalog
-            if not catalog_path or not catalog_path_with_slash.startswith(
-                f"user-datasets/{workspace}/"
-            ):
-                raise HTTPException(
-                    status_code=403,
-                    detail=f"Workspace {workspace} does not have access to {catalog_path if catalog_path else 'top-level'} catalog",
-                )
+        # Confirm user has access to this part of the catalog
+        # Retrive collection to confirm owning workspace
+        collection = await self.database.find_collection(
+            catalog_path=catalog_path, collection_id=collection_id
+        )
+        owner = collection["access_control_owner"]
+
+        if owner != workspace:
+            raise HTTPException(
+                status_code=403, detail="Workspace does not have access to this Catalog"
+            )
 
         await self.database.delete_collection(
             collection_id=collection_id, catalog_path=catalog_path
@@ -2122,8 +2097,7 @@ class TransactionsClient(AsyncBaseTransactionsClient):
         self,
         workspace: str,
         catalog_path: str,
-        is_public: bool = False,
-        access_list: List[str] = [],
+        access_policy: stac_types.AccessPolicy,
         **kwargs,
     ):
 
@@ -2142,17 +2116,14 @@ class TransactionsClient(AsyncBaseTransactionsClient):
             parent_catalog_path,
         )
 
+        access_list = access_policy.get("acl", [])
+        is_public = access_policy.get("public", False)
+
         # Retrive catalog to confirm owning workspace
         catalog = await self.database.find_catalog(catalog_path=catalog_path)
         owner = catalog["access_control_owner"]
 
-        if workspace == "default_workspace":
-            if catalog_path_list[0] == "user-datasets":
-                workspace = catalog_path_list[1]
-
-        logger.info("Input workspace set to %s", workspace)
-
-        if not owner == workspace:
+        if owner != workspace:
             raise HTTPException(
                 status_code=403, detail="Workspace does not have access to this Catalog"
             )
@@ -2176,9 +2147,8 @@ class TransactionsClient(AsyncBaseTransactionsClient):
         self,
         workspace: str,
         collection_id: str,
+        access_policy: stac_types.AccessPolicy,
         catalog_path: Optional[str] = None,
-        is_public: bool = False,
-        access_list: List[str] = [],
         **kwargs,
     ):
 
@@ -2188,18 +2158,16 @@ class TransactionsClient(AsyncBaseTransactionsClient):
             catalog_path,
         )
 
+        access_list = access_policy.get("acl", [])
+        is_public = access_policy.get("public", False)
+
         # Retrive catalog to confirm owning workspace
         collection = await self.database.find_collection(
             catalog_path=catalog_path, collection_id=collection_id
         )
         owner = collection["access_control_owner"]
 
-        if workspace == "default_workspace":
-            catalog_path_list = catalog_path.split("/")
-            if catalog_path_list[0] == "user-datasets":
-                workspace = catalog_path_list[1]
-
-        if not owner == workspace:
+        if owner != workspace:
             raise HTTPException(
                 status_code=403,
                 detail="Workspace does not have access to this Collection",
@@ -2226,8 +2194,6 @@ class TransactionsClient(AsyncBaseTransactionsClient):
         catalog: stac_types.Catalog,
         workspace: str,
         catalog_path: Optional[str] = None,
-        is_public: bool = False,
-        # access_list: List[str] = [],
         **kwargs,
     ) -> stac_types.Catalog:
         """Create a new catalog in the database.
@@ -2248,56 +2214,48 @@ class TransactionsClient(AsyncBaseTransactionsClient):
         """
         logger.info("Creating catalog")
 
-        logger.info("INPUTS")
-        logger.info(workspace)
+        logger.info(catalog_path)
 
         # Handle case where no catalog is provided
         if not catalog:
             raise HTTPException(status_code=400, detail="No catalog provided")
+        
+        # Only default workspace can alter top-level catalogs
+        if not catalog_path and workspace != "default_workspace":
+            HTTPException(
+                status_code=403,
+                detail=f"Workspace does not have access to top-level catalog",
+            )
+
+        # Determine public setting
+        if workspace == "default_workspace":
+            is_public = True
+        else:
+            is_public = False
 
         base_url = str(kwargs["request"].base_url)
 
-        # Confirm that the workspace provides correct access to the part of the catalogue to be altered
-        # check kubernetes manifest for given workspace to confirm access
-        # TODO: use Kubernetes API to confirm sub-catalog path access required for transaction
-        # For now, if this is a user workspace, confirm the changes are being made to the user's own workspace sub-catalog
-        # e.g. user-datasets/user-workspace/collection
-        if workspace != "default_workspace":
-            catalog_path_with_slash = f"{catalog_path}/" if catalog_path else ""
-            # This workspace can create its own subcatalog with the same id as the workspace name
-            if (
-                catalog_path
-                and catalog_path.startswith("user-datasets")
-                and catalog["id"] == workspace
-            ):
-                username = workspace
-            # This workspace can then only write to the user-datasets/<workspace> sub-catalog
-            elif not catalog_path or not catalog_path_with_slash.startswith(
-                f"user-datasets/{workspace}/"
-            ):
+        # Confirm user has access to parent catalog
+        # Retrive catalog to confirm owning workspace
+        if catalog_path:
+            parent_catalog = await self.database.find_catalog(catalog_path=catalog_path)
+            owner = parent_catalog["access_control_owner"]
+            # Set to private for the minute, in future this should take the parent access, but there are complexities here
+            # e.g. as access to a collection implies access to a parent, there could be cross-permissions that are
+            # not desired by the users creating new catalogs
+            # access_control = catalog["access_control_workspaces"]
+        else:
+            owner = "default_workspace"
+
+        if owner != workspace:
+            # Specific case where the workspace owner is trying to create their own catalog underneath one of the top-level catalogs
+            if owner != "default_workspace":
                 raise HTTPException(
-                    status_code=403,
-                    detail=f"Workspace {workspace} does not have access to {catalog_path if catalog_path else 'top-level'} catalog",
+                    status_code=403, detail="Workspace does not have access to this Catalog"
                 )
 
-        # Handle case where entry is not public but no username is provided, use catalog id instead
-        if workspace == "default_workspace" and not is_public:
-            # Should only be used to create top-level workspace catalogs e.g. user-datasets/<workspace>
-            catalog_path_list = catalog_path.split("/") if catalog_path else []
-            if len(catalog_path_list) > 1 and catalog_path_list[0] == "user-datasets":
-                username = catalog_path_list[1]
-            else:
-                # Assume username from catalog id itself
-                username = catalog["id"]
-        elif not is_public:
-            # Used for adding files to workspaces sub-catalogs
-            username = workspace
-        else:
-            # Used to add public data to catalogs
-            username = ""
-
         # Generate user access bitstring for entry
-        access_list = [username]
+        access_list = [workspace]
         workspace_access_bitstring = create_bitstring(
             ids=access_list, is_public=is_public
         )
@@ -2311,7 +2269,7 @@ class TransactionsClient(AsyncBaseTransactionsClient):
         await self.database.create_catalog(
             catalog_path=catalog_path,
             catalog=catalog,
-            owner=username,
+            owner=workspace,
             access_control=workspace_access_bitstring,
         )
 
@@ -2348,26 +2306,22 @@ class TransactionsClient(AsyncBaseTransactionsClient):
         base_url = str(kwargs["request"].base_url)
 
         # Check the owner of the specified catalog
-        catalog = await self.database.find_catalog(catalog_path=catalog_path)
-        catalog_owner = catalog["access_control_owner"]
+        old_catalog = await self.database.find_catalog(catalog_path=catalog_path)
+        catalog_owner = old_catalog["access_control_owner"]
+        access_control = old_catalog["access_control_workspaces"]
 
         # Confirm that the workspace provides correct access to the part of the catalogue to be altered
-        # check kubernetes manifest for given workspace to confirm access
-        # TODO: use Kubernetes API to confirm sub-catalog path access required for transaction
-        # For now, if this is a user workspace, confirm the changes are being made to the user's own workspace sub-catalog
-        # e.g. user-datasets/user-workspace/collection
-        if workspace != "default_workspace":
-            # if not default_workspace, this is a user workspace
-            if workspace != catalog_owner:
-                raise HTTPException(
-                    status_code=403,
-                    detail=f"Workspace {workspace} does not have access to {catalog_path if catalog_path else 'top-level'} catalog",
-                )
+        if workspace != catalog_owner:
+            raise HTTPException(
+                status_code=403,
+                detail=f"Workspace {workspace} does not have access to {catalog_path if catalog_path else 'top-level'} catalog",
+            )
 
         catalog = self.database.catalog_serializer.stac_to_db(
             catalog=catalog, base_url=base_url
         )
-        await self.database.update_catalog(catalog_path=catalog_path, catalog=catalog)
+        # Set owner and access_control to that of before
+        await self.database.update_catalog(catalog_path=catalog_path, catalog=catalog, owner=workspace, access_control=access_control)
 
         # This catalog does not yet have any collections or sub-catalogs
         return CatalogSerializer.db_to_stac(
@@ -2395,21 +2349,15 @@ class TransactionsClient(AsyncBaseTransactionsClient):
         """
         logger.info("Deleting catalog")
 
-        # Confirm that the workspace provides correct access to the part of the catalogue to be altered
-        # check kubernetes manifest for given workspace to confirm access
-        # TODO: use Kubernetes API to confirm sub-catalog path access required for transaction
-        # For now, if this is a user workspace, confirm the changes are being made to the user's own workspace sub-catalog
-        # e.g. user-datasets/user-workspace/collection
-        if workspace != "default_workspace":
-            catalog_path_with_slash = f"{catalog_path}/" if catalog_path else ""
-            # This workspace can only write to the user-datasets/user-workspace sub-catalog
-            if not catalog_path or not catalog_path_with_slash.startswith(
-                f"user-datasets/{workspace}/"
-            ):
-                raise HTTPException(
-                    status_code=403,
-                    detail=f"Workspace {workspace} does not have access to {catalog_path if catalog_path else 'top-level'} catalog",
-                )
+        # Confirm user has access to this part of the catalog
+        # Retrive catalog to confirm owning workspace
+        catalog = await self.database.find_catalog(catalog_path=catalog_path)
+        owner = catalog["access_control_owner"]
+
+        if owner != workspace:
+            raise HTTPException(
+                status_code=403, detail="Workspace does not have access to this Catalog"
+            )
 
         await self.database.delete_catalog(catalog_path=catalog_path)
         return None

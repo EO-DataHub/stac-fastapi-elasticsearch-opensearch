@@ -2062,7 +2062,8 @@ class DatabaseLogic:
         Args:
             catalog_path (str): The parent catalog into which the Collection will be inserted.
             collection (Collection): The collection to be created.
-            access_control (tuple): Tuple defining String bitstring defining data owner and workpace access
+            owner (str): Owner for the collection
+            access_control (str): String defining String bitstring defining data owner and workpace access
             refresh (bool, optional): Refresh the index after performing the operation. Defaults to False.
 
         Raises:
@@ -2091,7 +2092,6 @@ class DatabaseLogic:
             "access_control_owner": owner,
             "access_control_workspaces": access_control,
         }
-        print(annotations)
         await self.client.update(
             index=index_collections_by_catalog_id(catalog_path_list=catalog_path_list),
             id=collection_id,
@@ -2199,6 +2199,8 @@ class DatabaseLogic:
         catalog_path: str,
         collection_id: str,
         collection: Collection,
+        owner: str,
+        access_control: str,
         refresh: bool = False,
     ):
         """Update a collection from the database.
@@ -2208,6 +2210,8 @@ class DatabaseLogic:
             catalog_path (str): The path of the catalog containing the collection to be updated, including parent catalogs, e.g. parentCat/cat
             collection_id (str): The ID of the collection to be updated.
             collection (Collection): The Collection object to be used for the update.
+            owner (str): Owner for this collection
+            access_control (str): String defining String bitstring defining data owner and workpace access
 
         Raises:
             NotFoundError: If the collection with the given `collection_id` is not
@@ -2222,18 +2226,12 @@ class DatabaseLogic:
         # Create list of nested catalog ids
         catalog_path_list = catalog_path.split("/")
 
-        current_collection = await self.find_collection(
-            catalog_path=catalog_path, collection_id=collection_id
-        )
-
-        # Access current access control bitstring, as this will remain identical
-        access_control = current_collection["access_control_workspaces"]
-
         if collection_id != collection["id"]:
             await self.create_collection(
                 catalog_path=catalog_path,
                 collection=collection,
                 refresh=refresh,
+                owner=owner,
                 access_control=access_control,
             )
             dest_index = index_by_collection_id(
@@ -2276,7 +2274,10 @@ class DatabaseLogic:
             )
 
             # Record access control bitstring for this document
-            annotation = {"access_control_workspaces": access_control}
+            annotation = {
+                "access_control_owner": owner, 
+                "access_control_workspaces": access_control
+            }
             await self.client.update(
                 index=index_collections_by_catalog_id(
                     catalog_path_list=catalog_path_list
@@ -2438,7 +2439,8 @@ class DatabaseLogic:
 
         Args:
             catalog (Catalog): The Catalog object to be created.
-            access_control (tuple): Tuple defining String bitstring defining data owner and workpace access
+            owner (str): Owner for this collection
+            access_control (str): String defining String bitstring defining data owner and workpace access
             catalog_path (Optional[str]): The path to the parent catalog into which the new catalog will be inserted. Default is None.
             refresh (bool, optional): Whether to refresh the index after the creation. Default is False.
 
@@ -2788,7 +2790,7 @@ class DatabaseLogic:
             )
 
     async def update_catalog(
-        self, catalog_path: str, catalog: Catalog, refresh: bool = False
+        self, catalog_path: str, catalog: Catalog, owner: str, access_control: str, refresh: bool = False
     ):
         """Update a collection from the database.
 
@@ -2813,17 +2815,20 @@ class DatabaseLogic:
 
         catalog_id = catalog_path_list[-1]
 
-        await self.find_catalog(catalog_path=catalog_path)
-
         if catalog_id != catalog["id"]:
             old_catalog_path_list = catalog_path_list.copy()
-            # Remove old catalog_id and replace with new one
-            new_catalog_path_list = catalog_path_list[:-1]
-            new_catalog_parent_path = "/".join(new_catalog_path_list)
-            new_catalog_path_list.append(catalog["id"])
+
+            if len(catalog_path_list) < 2:
+                new_catalog_parent_path = None
+                new_catalog_path_list = [catalog_id]
+            else:
+                # Remove old catalog_id and replace with new one
+                new_catalog_path_list = catalog_path_list[:-1]
+                new_catalog_parent_path = "/".join(new_catalog_path_list)
+                new_catalog_path_list.append(catalog["id"])
 
             await self.create_catalog(
-                catalog_path=new_catalog_parent_path, catalog=catalog, refresh=refresh
+                catalog_path=new_catalog_parent_path, catalog=catalog, owner=owner, access_control=access_control, refresh=refresh
             )
 
             # Recursively update all catalogs within this catalog
@@ -2831,11 +2836,12 @@ class DatabaseLogic:
             params_index = index_catalogs_by_catalog_id(
                 catalog_path_list=catalog_path_list
             )
+            query = {
+                "_source": False,  # Do not retrieve the _source field
+                "query": {"match_all": {}},
+            }
             response = await self.client.search(
-                index=params_index,
-                body={
-                    "sort": [{"id": {"order": "asc"}}],
-                },
+                index=params_index, body=query, size=NUMBER_OF_CATALOG_COLLECTIONS
             )
             hits = response["hits"]["hits"]
 
@@ -2939,9 +2945,12 @@ class DatabaseLogic:
             try:
                 # Get all collections contained in this catalog
                 index_param = collection_indices(catalog_paths=[old_catalog_path_list])
+                query = {
+                    "_source": False,  # Do not retrieve the _source field
+                    "query": {"match_all": {}},
+                }
                 response = await self.client.search(
-                    index=index_param,
-                    body={"sort": [{"id": {"order": "asc"}}]},
+                    index=index_param, body=query, size=NUMBER_OF_CATALOG_COLLECTIONS
                 )
                 collection_ids = [hit["_id"] for hit in response["hits"]["hits"]]
 
@@ -2977,14 +2986,29 @@ class DatabaseLogic:
             await self.delete_catalog(catalog_path=catalog_path)
 
         else:
-            index_param = index_catalogs_by_catalog_id(
-                catalog_path_list=catalog_path_list[:-1]
-            )
+            if len(catalog_path_list) < 2:
+                index_param = ROOT_CATALOGS_INDEX
+            else:
+                index_param = index_catalogs_by_catalog_id(
+                    catalog_path_list=catalog_path_list[:-1]
+                )
             await self.client.index(
                 index=index_param,
                 id=catalog_id,
                 document=catalog,
                 refresh=refresh,
+            )
+            # Record access control bitstring for this document
+            annotations = {
+                "access_control_owner": owner,
+                "access_control_workspaces": access_control,
+            }
+
+            await self.client.update(
+                index=index_param,
+                id=catalog_id,
+                refresh=refresh,
+                body={"doc": annotations},
             )
 
     async def delete_catalog(self, catalog_path: str, refresh: bool = False):

@@ -104,7 +104,6 @@ class AsyncBaseTransactionsClient(abc.ABC):
         catalog_path: str,
         collection: stac_types.Collection,
         workspace: str,
-        is_public: bool = False,
         **kwargs,
     ) -> Optional[Union[stac_types.Collection, Response]]:
         """Create a new collection.
@@ -165,7 +164,6 @@ class AsyncBaseTransactionsClient(abc.ABC):
         catalog: stac_types.Catalog,
         workspace: str,
         catalog_path: Optional[str],
-        is_public: bool = False,
         **kwargs,
     ) -> Optional[stac_types.Catalog | Response]:
         """Create a new catalog.
@@ -203,9 +201,8 @@ class AsyncBaseTransactionsClient(abc.ABC):
     async def update_catalog_access_control(
         self,
         workspace: str,
+        access_policy: stac_types.AccessPolicy,
         catalog_path: Optional[str] = None,
-        is_public: bool = False,
-        access_list: List[str] = [],
     ):
         """Perform a complete update on an the access control for the given catalog.
 
@@ -216,8 +213,7 @@ class AsyncBaseTransactionsClient(abc.ABC):
         Args:
             workspace: the workspace that is requesting to make the change
             catalog_path: the path to the catalog to be updated
-            is_public: whether the catalog is public
-            access_list: list of workspaces that have access to the catalog
+            access_policy: dictionary defining access policy for the catalog
 
         Returns:
             N/A
@@ -229,9 +225,8 @@ class AsyncBaseTransactionsClient(abc.ABC):
         self,
         workspace: str,
         collection_id: str,
+        access_policy: stac_types.AccessPolicy,
         catalog_path: Optional[str] = None,
-        is_public: bool = False,
-        access_list: List[str] = [],
     ):
         """Perform a complete update on an the access control for the given collection.
 
@@ -243,8 +238,7 @@ class AsyncBaseTransactionsClient(abc.ABC):
             workspace: the workspace that is requesting to make the change
             collection_id: the id of the collection to be updated
             catalog_path: the path to the catalog to be updated
-            is_public: whether the catalog is public
-            access_list: list of workspaces that have access to the catalog
+            access_policy: dictionary defining access policy for the collection
 
         Returns:
             N/A
