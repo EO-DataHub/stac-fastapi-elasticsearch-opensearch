@@ -78,7 +78,6 @@ DEFAULT_SORT = {
 }
 
 DEFAULT_COLLECTIONS_SORT = {
-    "extent.temporal.interval": {"order": "desc"},
     "id": {"order": "desc"},
 }
 
@@ -714,16 +713,15 @@ class DatabaseLogic:
 
         search_after = None
         if token:
-            search_after = [token]
+            search_after = urlsafe_b64decode(token.encode()).decode().split(",")
 
         # Logic to ensure next token only returned when further results are available
         max_result_window = stac_fastapi.types.search.Limit.le
         size_limit = min(limit + 1, max_result_window)
 
         collections = []
-        hit_tokens = []
 
-        while len(collections) < limit and search_after:
+        while len(collections) < limit:
             try:
                 response = await self.client.search(
                     index=f"{COLLECTIONS_INDEX_PREFIX}*",
@@ -756,18 +754,27 @@ class DatabaseLogic:
                             catalog_path=catalog_path,
                         )
                     )
-                    if hit.get("sort"):
-                        hit_token = hit["sort"][0]
-                        hit_tokens.append(hit_token)
-                    else:
-                        hit_tokens.append(None)
+                    if len(collections) == limit:
+                        token = None
+                        # Return token for current final asset, as we know the user has access to this one
+                        if sort_array := hit.get("sort"):
+                            token = urlsafe_b64encode(
+                                    ",".join([str(x) for x in sort_array]).encode()
+                                ).decode()
+                        break
+            if len(collections) == limit:
+                # break out of while loop
+                break
 
             search_after = None
             if len(hits) > limit and limit < max_result_window:
-                if hits and (hits[limit - 1].get("sort")):
-                    search_after = hits[limit - 1]["sort"][0]
+                if hits and (sort_array := hits[limit - 1].get("sort")):
+                    search_after = sort_array
+            if not search_after:
+                token = None
+                break
 
-        return collections, search_after
+        return collections, token
 
     async def get_catalog_collections(
         self, catalog_path: str, token: Optional[str], limit: int, base_url: str, user_index: int
@@ -798,6 +805,8 @@ class DatabaseLogic:
                 index=index_param, body=query, size=NUMBER_OF_CATALOG_COLLECTIONS
             )
             hits = response["hits"]["hits"]
+
+            collections = []
 
             for hit in hits:
                 if int(hit["_source"]["_sfapi_internal"]["access"][-1]) or int(
@@ -841,23 +850,24 @@ class DatabaseLogic:
         if catalog_path:
             # Create list of nested catalog ids
             catalog_path_list = catalog_path.split("/")
+            params_index = index_catalogs_by_catalog_id(catalog_path_list=catalog_path_list)
         else:
             catalog_path_list = None
-
-        params_index = index_catalogs_by_catalog_id(catalog_path_list=catalog_path_list)
+            params_index = ROOT_CATALOGS_INDEX
 
         search_after = None
         if token:
-            search_after = [token]
+            search_after = urlsafe_b64decode(token.encode()).decode().split(",")
 
         # Logic to ensure next token only returned when further results are available
         max_result_window = stac_fastapi.types.search.Limit.le
         size_limit = min(limit + 1, max_result_window)
 
         catalog_indices_list = []
+        allowed_hits = []
 
         # Get all contained catalogs
-        while len(catalog_indices_list) < limit and search_after:
+        while len(catalog_indices_list) < limit:
             try:
                 response = await self.client.search(
                     index=params_index,
@@ -872,6 +882,7 @@ class DatabaseLogic:
                 response = None
                 catalogs = []
                 hits = []
+                allowed_hits = []
                 break
 
             # Construct async tasks
@@ -887,27 +898,41 @@ class DatabaseLogic:
                         hit["_source"]["_sfapi_internal"]["access"][user_index]
                     ):
                         catalog_indices_list.append(catalog_index_list)
-                        if hit.get("sort"):
-                            hit_token = hit["sort"][0]
-                            hit_tokens.append(hit_token)
-                        else:
-                            hit_tokens.append(None)
+                        allowed_hits.append(hit)
+                        if len(allowed_hits) == limit:
+                            token = None
+                            # Return token for current final asset, as we know the user has access to this one
+                            if sort_array := hit.get("sort"):
+                                token = urlsafe_b64encode(
+                                        ",".join([str(x) for x in sort_array]).encode()
+                                    ).decode()
+                            break
                 except IndexError:
                     catalog_index_list = [catalog_id]
                     if int(hit["_source"]["_sfapi_internal"]["access"][-1]) or int(
                         hit["_source"]["_sfapi_internal"]["access"][user_index]
                     ):
                         catalog_indices_list.append(catalog_index_list)
-                        if hit.get("sort"):
-                            hit_token = hit["sort"][0]
-                            hit_tokens.append(hit_token)
-                        else:
-                            hit_tokens.append(None)
+                        allowed_hits.append(hit)
+                        if len(allowed_hits) == limit:
+                            token = None
+                            # Return token for current final asset, as we know the user has access to this one
+                            if sort_array := hit.get("sort"):
+                                token = urlsafe_b64encode(
+                                        ",".join([str(x) for x in sort_array]).encode()
+                                    ).decode()
+                            break
+            if len(allowed_hits) == limit:
+                # break out of while loop
+                break
 
             search_after = None
             if len(hits) > limit and limit < max_result_window:
-                if hits and (hits[limit - 1].get("sort")):
-                    search_after = hits[limit - 1]["sort"][0]
+                if hits and (sort_array := hits[limit - 1].get("sort")):
+                    search_after = sort_array
+            if not search_after:
+                token = None
+                break
 
         sub_catalogs_results = await asyncio.gather(
             *[
@@ -957,8 +982,7 @@ class DatabaseLogic:
 
         catalogs = []
         collections = []
-        hit_tokens = []
-        for i, hit in enumerate(hits):
+        for i, hit in enumerate(allowed_hits):
             catalog_path = hit["_index"].split("_", 1)[1]
             catalog_path_list = catalog_path.split(CATALOG_SEPARATOR)
             catalog_path_list.reverse()
@@ -992,7 +1016,7 @@ class DatabaseLogic:
                 )
             )
 
-        return catalogs, search_after
+        return catalogs, token
 
     async def get_catalog_subcatalogs(
         self,
@@ -1520,17 +1544,17 @@ class DatabaseLogic:
         elif catalog_paths:
             index_param = indices(catalog_paths=catalog_paths_list)
 
-        count_task = asyncio.create_task(
-            self.client.count(
-                index=index_param,
-                ignore_unavailable=ignore_unavailable,
-                body=search.to_dict(count=True),
-            )
-        )
+        # count_task = asyncio.create_task(
+        #     self.client.count(
+        #         index=index_param,
+        #         ignore_unavailable=ignore_unavailable,
+        #         body=search.to_dict(count=True),
+        #     )
+        # )
 
-        items = []
+        items_and_cat_paths = []
 
-        while len(items) < limit and search_after:
+        while len(items_and_cat_paths) < limit:
 
             search_task = asyncio.create_task(
                 self.client.search(
@@ -1552,44 +1576,53 @@ class DatabaseLogic:
 
             hits = es_response["hits"]["hits"]
 
-            # Need to identify catalog for each item
-            items = []
-            hit_tokens = []
             for hit in hits[:]:
                 item_catalog_path = hit["_index"].split(GROUP_SEPARATOR, 1)[1]
                 item_catalog_path_list = item_catalog_path.split(CATALOG_SEPARATOR)
                 item_catalog_path_list.reverse()
                 item_catalog_path = "/".join(item_catalog_path_list)
-                items.append((hit["_source"], item_catalog_path))
-                collection = await self.database.find_collection(
+                collection = await self.find_collection(
                     catalog_path=item_catalog_path,
                     collection_id=hit["_source"]["collection"],
                 )
                 access_control = collection["_sfapi_internal"]["access"]
                 if int(access_control[-1]) or int(access_control[user_index]):
-                    items.append(hit["_source"])
+                    items_and_cat_paths.append((hit["_source"], item_catalog_path))
+                    if len(items_and_cat_paths) == limit:
+                        token = None
+                        # Return token for current final asset, as we know the user has access to this one
+                        if sort_array := hit.get("sort"):
+                            token = urlsafe_b64encode(
+                                    ",".join([str(x) for x in sort_array]).encode()
+                                ).decode()
+                        break
+            if len(items_and_cat_paths) == limit:
+                # break out of while loop
+                break
 
             search_after = None
             if len(hits) > limit and limit < max_result_window:
                 if hits and (sort_array := hits[limit - 1].get("sort")):
-                    search_after = urlsafe_b64encode(
-                        ",".join([str(x) for x in sort_array]).encode()
-                    ).decode()
+                    search_after = sort_array
+            if not search_after:
+                token = None
+                break
 
         # (1) count should not block returning results, so don't wait for it to be done
         # (2) don't cancel the task so that it will populate the ES cache for subsequent counts
-        matched = (
-            es_response["hits"]["total"]["value"]
-            if es_response["hits"]["total"]["relation"] == "eq"
-            else None
-        )
-        if count_task.done():
-            try:
-                matched = count_task.result().get("count")
-            except Exception as e:
-                logger.error(f"Count task failed: {e}")
+        matched = None
+        # matched = (
+        #     es_response["hits"]["total"]["value"]
+        #     if es_response["hits"]["total"]["relation"] == "eq"
+        #     else None
+        # )
+        # if count_task.done():
+        #     try:
+        #         matched = count_task.result().get("count")
+        #     except Exception as e:
+        #         logger.error(f"Count task failed: {e}")
 
-        return items, matched, next_token, hit_tokens
+        return items_and_cat_paths, matched, token
 
     async def execute_collection_search(
         self,
@@ -1643,18 +1676,18 @@ class DatabaseLogic:
         max_result_window = stac_fastapi.types.search.Limit.le
         size_limit = min(limit + 1, max_result_window)
 
-        count_task = asyncio.create_task(
-            self.client.count(
-                index=f"{COLLECTIONS_INDEX_PREFIX}*",
-                ignore_unavailable=ignore_unavailable,
-                body=search.to_dict(count=True),
-            )
-        )
+        # count_task = asyncio.create_task(
+        #     self.client.count(
+        #         index=f"{COLLECTIONS_INDEX_PREFIX}*",
+        #         ignore_unavailable=ignore_unavailable,
+        #         body=search.to_dict(count=True),
+        #     )
+        # )
 
         collections = []
-        hit_tokens = []
 
-        while len(collections) < limit and search_after:
+        # Loop condition only used to ensure no endless looping
+        while len(collections) < limit:
 
             search_task = asyncio.create_task(
                 self.client.search(
@@ -1670,7 +1703,7 @@ class DatabaseLogic:
             es_response = await search_task
 
             hits = es_response["hits"]["hits"]
-            for hit in hits:
+            for i, hit in enumerate(hits):
                 if int(hit["_source"]["_sfapi_internal"]["access"][-1]) or int(
                     hit["_source"]["_sfapi_internal"]["access"][user_index]
                 ):
@@ -1685,35 +1718,41 @@ class DatabaseLogic:
                             catalog_path=catalog_path,
                         )
                     )
-                    if sort_array := hit.get("sort"):
-                        hit_token = urlsafe_b64encode(
-                            ",".join([str(x) for x in sort_array]).encode()
-                        ).decode()
-                        hit_tokens.append(hit_token)
-                    else:
-                        hit_tokens.append(None)
+                    if len(collections) == limit:
+                        token = None
+                        # Return token for current final asset, as we know the user has access to this one
+                        if sort_array := hit.get("sort"):
+                            token = urlsafe_b64encode(
+                                    ",".join([str(x) for x in sort_array]).encode()
+                                ).decode()
+                        break
+            if len(collections) == limit:
+                # break out of while loop
+                break
 
             search_after = None
             if len(hits) > limit and limit < max_result_window:
                 if hits and (sort_array := hits[limit - 1].get("sort")):
-                    search_after = urlsafe_b64encode(
-                        ",".join([str(x) for x in sort_array]).encode()
-                    ).decode()
+                    search_after = sort_array
+            if not search_after:
+                token = None
+                break
 
         # (1) count should not block returning results, so don't wait for it to be done
         # (2) don't cancel the task so that it will populate the ES cache for subsequent counts
-        matched = (
-            es_response["hits"]["total"]["value"]
-            if es_response["hits"]["total"]["relation"] == "eq"
-            else None
-        )
-        if count_task.done():
-            try:
-                matched = count_task.result().get("count")
-            except Exception as e:
-                logger.error(f"Count task failed: {e}")
+        matched = None
+        # matched = (
+        #     es_response["hits"]["total"]["value"]
+        #     if es_response["hits"]["total"]["relation"] == "eq"
+        #     else None
+        # )
+        # if count_task.done():
+        #     try:
+        #         matched = count_task.result().get("count")
+        #     except Exception as e:
+        #         logger.error(f"Count task failed: {e}")
 
-        return collections, matched, search_after
+        return collections, matched, token
 
     """ TRANSACTION LOGIC """
 
@@ -2031,7 +2070,6 @@ class DatabaseLogic:
 
     async def update_parent_access_control(
         self,
-        owner: str,
         catalog_path_list: List[str],
         new_workspaces_bitstring: str,
     ):
@@ -2049,13 +2087,14 @@ class DatabaseLogic:
                 ),
                 id=catalog_id,
             )
+            parent_catalog_owner = catalog["_source"]["_sfapi_internal"]["owner"]
             old_workspaces_bitstring = catalog["_source"]["_sfapi_internal"]["access"]
             new_workspaces_bitstring = self._combine_bitstrings(
                 old_workspaces_bitstring, new_workspaces_bitstring
             )
             annotations = {
                 "_sfapi_internal": {
-                    "owner": owner,
+                    "owner": parent_catalog_owner,
                     "access": new_workspaces_bitstring,
                 }
             }
@@ -2080,6 +2119,7 @@ class DatabaseLogic:
                 index=ROOT_CATALOGS_INDEX,
                 id=catalog_id,
             )
+            parent_catalog_owner = catalog["_source"]["_sfapi_internal"]["owner"]
             old_workspaces_bitstring = catalog["_source"]["_sfapi_internal"]["access"]
             new_workspaces_bitstring = self._combine_bitstrings(
                 old_workspaces_bitstring, new_workspaces_bitstring
@@ -2087,7 +2127,7 @@ class DatabaseLogic:
 
             annotations = {
                 "_sfapi_internal": {
-                    "owner": owner,
+                    "owner": parent_catalog_owner,
                     "access": new_workspaces_bitstring,
                 }
             }
@@ -2591,11 +2631,15 @@ class DatabaseLogic:
             }
         }
 
+
+        
+
         # Get all documents in the chosen index
         query = {
             "_source": False,  # Do not retrieve the _source field
             "query": {"match_all": {}},
         }
+
 
         try:
             response = await self.client.search(
@@ -2673,7 +2717,6 @@ class DatabaseLogic:
         if catalog_path:
             await self.update_parent_access_control(
                 catalog_path_list=catalog_path_list,
-                owner=owner,
                 new_workspaces_bitstring=access_control,
             )
         # Update recursive access for nested catalogs
@@ -3279,20 +3322,20 @@ class DatabaseLogic:
         max_result_window = stac_fastapi.types.search.Limit.le
         size_limit = min(limit + 1, max_result_window)
 
-        count_task = asyncio.create_task(
-            self.client.count(
-                index=[f"{CATALOGS_INDEX_PREFIX}*", f"{COLLECTIONS_INDEX_PREFIX}*"],
-                ignore_unavailable=ignore_unavailable,
-                body=search.to_dict(count=True),
-            )
-        )
+        # count_task = asyncio.create_task(
+        #     self.client.count(
+        #         index=[f"{CATALOGS_INDEX_PREFIX}*", f"{COLLECTIONS_INDEX_PREFIX}*"],
+        #         ignore_unavailable=ignore_unavailable,
+        #         body=search.to_dict(count=True),
+        #     )
+        # )
 
         data = []
         catalog_hits = []
         collection_hits = []
         catalog_index_lists_for_catalogs = []
 
-        while len(catalog_hits) + len(collection_hits) < limit and search_after:
+        while len(catalog_hits) + len(collection_hits) < limit:
             search_task = asyncio.create_task(
                 self.client.search(
                     index=[f"{CATALOGS_INDEX_PREFIX}*", f"{COLLECTIONS_INDEX_PREFIX}*"],
@@ -3324,13 +3367,25 @@ class DatabaseLogic:
                         catalog_index = "/".join(catalog_index_list)
                     else:
                         collection_hits.append(hit)
+                    if len(catalog_hits) + len(collection_hits) == limit:
+                        token = None
+                        # Return token for current final asset, as we know the user has access to this one
+                        if sort_array := hit.get("sort"):
+                            token = urlsafe_b64encode(
+                                    ",".join([str(x) for x in sort_array]).encode()
+                                ).decode()
+                        break
+            if len(catalog_hits) + len(collection_hits) == limit:
+                # break out of while loop
+                break
             
             search_after = None
             if len(hits) > limit and limit < max_result_window:
                 if hits and (sort_array := hits[limit - 1].get("sort")):
-                    search_after = urlsafe_b64encode(
-                        ",".join([str(x) for x in sort_array]).encode()
-                    ).decode()
+                    search_after = sort_array
+            if not search_after:
+                token = None
+                break
 
         catalogs_results = await asyncio.gather(
             *[
@@ -3420,13 +3475,6 @@ class DatabaseLogic:
                     conformance_classes=conformance_classes,
                 )
             )
-            if sort_array := hit.get("sort"):
-                hit_token = urlsafe_b64encode(
-                    ",".join([str(x) for x in sort_array]).encode()
-                ).decode()
-                hit_tokens.append(hit_token)
-            else:
-                hit_tokens.append(None)
         for i, hit in enumerate(collection_hits):
             if hit["_source"]["type"] == "Collection":
                 catalog_index = hit["_index"].split("_", 1)[1]
@@ -3447,32 +3495,19 @@ class DatabaseLogic:
                         conformance_classes=conformance_classes,
                     )
                 )
-                if sort_array := hit.get("sort"):
-                    hit_token = urlsafe_b64encode(
-                        ",".join([str(x) for x in sort_array]).encode()
-                    ).decode()
-                    hit_tokens.append(hit_token)
-                else:
-                    hit_tokens.append(None)
-
-        next_token = None
-        if len(hits) > limit and limit < max_result_window:
-            if hits and (sort_array := hits[limit - 1].get("sort")):
-                next_token = urlsafe_b64encode(
-                    ",".join([str(x) for x in sort_array]).encode()
-                ).decode()
 
         # (1) count should not block returning results, so don't wait for it to be done
         # (2) don't cancel the task so that it will populate the ES cache for subsequent counts
-        matched = (
-            es_response["hits"]["total"]["value"]
-            if es_response["hits"]["total"]["relation"] == "eq"
-            else None
-        )
-        if count_task.done():
-            try:
-                maybe_count = count_task.result().get("count")
-            except Exception as e:
-                logger.error(f"Count task failed: {e}")
+        matched = None
+        # matched = (
+        #     es_response["hits"]["total"]["value"]
+        #     if es_response["hits"]["total"]["relation"] == "eq"
+        #     else None
+        # )
+        # if count_task.done():
+        #     try:
+        #         maybe_count = count_task.result().get("count")
+        #     except Exception as e:
+        #         logger.error(f"Count task failed: {e}")
 
-        return data, matched, next_token, hit_tokens
+        return data, matched, token

@@ -717,7 +717,7 @@ class CoreClient(AsyncBaseCoreClient):
             search = self.database.apply_bbox_filter(search=search, bbox=bbox)
 
         # No further access control needed as already checked above for collection
-        items, maybe_count, next_token, _ = await self.database.execute_search(
+        items_and_cat_paths, maybe_count, next_token = await self.database.execute_search(
             search=search,
             catalog_paths=[catalog_path],
             limit=limit,
@@ -731,9 +731,9 @@ class CoreClient(AsyncBaseCoreClient):
         # from search results in a tuple
         items = [
             self.item_serializer.db_to_stac(
-                catalog_path=catalog_path, item=item[0], base_url=base_url
+                catalog_path=catalog_path, item=item_and_cat_path[0], base_url=base_url
             )
-            for item in items
+            for item_and_cat_path in items_and_cat_paths
         ]
 
         context_obj = None
@@ -1144,84 +1144,25 @@ class CoreClient(AsyncBaseCoreClient):
                 context={"returned": 0, "limit": limit},
             )
 
-        count = 0
-        while True:
-            logger.info("In for loop %s", count)
-            count += 1
-            temp_items, maybe_count, next_token, hit_tokens = (
-                await self.database.execute_search(
-                    search=search,
-                    limit=limit,
-                    token=token,  # type: ignore
-                    sort=sort,
-                    user_index=user_index,
-                    collection_ids=search_request.collections,
-                    catalog_paths=search_request.catalog_paths,
-                )
+        items_and_cat_paths, maybe_count, next_token = (
+            await self.database.execute_search(
+                search=search,
+                limit=limit,
+                token=token,  # type: ignore
+                sort=sort,
+                user_index=user_index,
+                collection_ids=search_request.collections,
+                catalog_paths=search_request.catalog_paths,
             )
-
-            # Filter results to those that are accessible to the user
-            for i, (item, hit_token) in enumerate(zip(temp_items, hit_tokens)):
-                # Get item index for path extraction
-                item_catalog_path = item[1]
-                # Get parent collection if collection is present
-                if "collection" in item[0]:
-                    parent_collection = item[0]["collection"]
-                    # Retrive collection data
-                    collection = await self.database.find_collection(
-                        catalog_path=item_catalog_path,
-                        collection_id=parent_collection,
-                    )
-                    # Get access control array for this collection
-                    try:
-                        access_control = collection["_sfapi_internal"]["access"]
-                        # Append item to list if user has access
-                        if int(access_control[-1]) or int(access_control[user_index]):
-                            items.append(item)
-                            if len(items) >= limit:
-                                if i < len(temp_items) - 1:
-                                    # Extract token from last result
-                                    next_token = hit_token
-                                    break
-                    except KeyError:
-                        logger.error(
-                            f"No access control found for collection {collection['id']}"
-                        )
-
-                # Get parent catalog if collection is not present
-                else:
-                    # Get access control array for this catalog
-                    catalog = await self.database.find_catalog(
-                        catalog_path=item_catalog_path
-                    )
-                    try:
-                        access_control = catalog["_sfapi_internal"]["access"]
-                        # Append item to list if user has access
-                        if int(access_control[-1]) or int(access_control[user_index]):
-                            items.append(item)
-                            if len(items) >= limit:
-                                # Extract token from last result
-                                if i < len(temp_items) - 1:
-                                    next_token = hit_token
-                                    break
-                    except KeyError:
-                        logger.error(
-                            f"No access control found for catalog {catalog['id']}"
-                        )
-
-            # If items now less than limit and more results, will need to run search again, giving next_token
-            if len(items) >= limit or not next_token:
-                # TODO: implement smarter token logic to return token of last returned ES entry
-                break
-            token = next_token
+        )
 
         # To handle catalog_id in links execute_search also returns the catalog_id
         # from search results in a tuple
         items = [
             self.item_serializer.db_to_stac(
-                item=item[0], base_url=base_url, catalog_path=item[1]
+                item=item_and_cat_path[0], base_url=base_url, catalog_path=item_and_cat_path[1]
             )
-            for item in items
+            for item_and_cat_path in items_and_cat_paths
         ]
 
         if self.extension_is_enabled("FieldsExtension"):
@@ -1523,82 +1464,25 @@ class CoreClient(AsyncBaseCoreClient):
 
         items = []
 
-        count = 0
-        while True:
-            logger.info("In for loop %s", count)
-            count += 1
-            temp_items, maybe_count, next_token, hit_tokens = (
-                await self.database.execute_search(
-                    search=search,
-                    limit=limit,
-                    token=token,  # type: ignore
-                    sort=sort,
-                    collection_ids=collections,
-                    catalog_paths=[catalog_path],
-                )
+        items_and_cat_paths, maybe_count, next_token = (
+            await self.database.execute_search(
+                search=search,
+                limit=limit,
+                token=token,  # type: ignore
+                sort=sort,
+                collection_ids=collections,
+                catalog_paths=[catalog_path],
+                user_index=user_index,
             )
-
-            # Filter results to those that are accessible to the user
-            for i, (item, hit_token) in enumerate(zip(temp_items, hit_tokens)):
-                # Get item index for path extraction
-                item_catalog_path = item[1]
-                # Get parent collection if collection is present
-                if "collection" in item[0]:
-                    parent_collection = item[0]["collection"]
-                    # Retrive collection data
-                    collection = await self.database.find_collection(
-                        catalog_path=item_catalog_path,
-                        collection_id=parent_collection,
-                    )
-                    # Get access control array for this collection
-                    try:
-                        access_control = collection["_sfapi_internal"]["access"]
-                        # Append item to list if user has access
-                        if int(access_control[-1]) or int(access_control[user_index]):
-                            items.append(item)
-                            if len(items) >= limit:
-                                if i < len(temp_items) - 1:
-                                    # Extract token from last result
-                                    next_token = hit_token
-                                    break
-                    except KeyError:
-                        logger.error(
-                            f"Access control not found for collection {collection['id']}"
-                        )
-                # Get parent catalog if collection is not present
-                else:
-                    # Get access control array for this catalog
-                    catalog = await self.database.find_catalog(
-                        catalog_path=item_catalog_path
-                    )
-                    try:
-                        access_control = catalog["_sfapi_internal"]["access"]
-                        # Append item to list if user has access
-                        if int(access_control[-1]) or int(access_control[user_index]):
-                            items.append(item)
-                            if len(items) >= limit:
-                                if i < len(temp_items) - 1:
-                                    # Extract token from last result
-                                    next_token = hit_token
-                                    break
-                    except KeyError:
-                        logger.error(
-                            f"Catalog access control not found for catalog {catalog['id']}"
-                        )
-
-            # If items now less than limit and more results, will need to run search again, giving next_token
-            if len(items) >= limit or not next_token:
-                # TODO: implement smarter token logic to return token of last returned ES entry
-                break
-            token = next_token
+        )
 
         # To handle catalog_id in links execute_search also returns the catalog_id
         # from search results in a tuple
         items = [
             self.item_serializer.db_to_stac(
-                item=item[0], base_url=base_url, catalog_path=item[1]
+                item=item_and_cat_path[0], base_url=base_url, catalog_path=item_and_cat_path[1]
             )
-            for item in items
+            for item_and_cat_path in items_and_cat_paths
         ]
 
         if self.extension_is_enabled("FieldsExtension"):
