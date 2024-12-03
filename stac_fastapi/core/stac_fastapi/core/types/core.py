@@ -204,10 +204,10 @@ class AsyncBaseTransactionsClient(abc.ABC):
         access_policy: stac_types.AccessPolicy,
         catalog_path: Optional[str] = None,
     ):
-        """Perform a complete update on an the access control for the given catalog.
+        """Perform a complete update on the access control for the given catalog.
 
-        Called with `PUT /catalogs/{catalog_path}`. This catalog must exist and this endpoint
-        Only updates the access control details for this catalog, either public or private or with a list of allowed workspaces,
+        Called with `PUT /catalogs/{catalog_path}/access-policy`. This catalog must exist and this endpoint
+        only updates the access control details for this catalog, either public or private or with a list of allowed workspaces,
         no other changes.
 
         Args:
@@ -228,10 +228,10 @@ class AsyncBaseTransactionsClient(abc.ABC):
         access_policy: stac_types.AccessPolicy,
         catalog_path: Optional[str] = None,
     ):
-        """Perform a complete update on an the access control for the given collection.
+        """Perform a complete update on the access control for the given collection.
 
-        Called with `PUT /catalogs/{catalog_path}/collections/{collection_id}`. This collection must exist and this endpoint.
-        Only updates the access control details for this collection, either public or private or with a list of allowed workspaces,
+        Called with `PUT /catalogs/{catalog_path}/collections/{collection_id}/access-policy`. This collection must exist and this endpoint
+        only updates the access control details for this collection, either public or private or with a list of allowed workspaces,
         no other changes.
 
         Args:

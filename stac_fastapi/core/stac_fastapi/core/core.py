@@ -217,7 +217,7 @@ class CoreClient(AsyncBaseCoreClient):
         for catalog in temp_catalogs:
             # Get access control array for each catalog
             try:
-                access_control = catalog["access_control_workspaces"]
+                access_control = catalog["_sfapi_internal"]["access"]
                 # Append catalog to list if user has access
                 # Convert to int to ensure 0 is falsy and 1 is truthy
                 if int(access_control[-1]) or int(access_control[user_index]):
@@ -356,43 +356,11 @@ class CoreClient(AsyncBaseCoreClient):
 
         collections = []
 
-        count = 0
-        while True:
-            logger.info("In for loop %s", count)
-            count += 1
-            temp_collections, next_token, hit_tokens = (
-                await self.database.get_all_collections(
-                    token=token, limit=limit, base_url=base_url
-                )
+        collections, next_token = (
+            await self.database.get_all_collections(
+                token=token, limit=limit, base_url=base_url, user_index=user_index
             )
-
-            for i, (collection, hit_token) in enumerate(
-                zip(temp_collections, hit_tokens)
-            ):
-                # Get access control array for each collection
-                try:
-                    access_control = collection["access_control_workspaces"]
-                    collection.pop("access_control_owner")
-                    collection.pop("access_control_workspaces")
-                    # Append collection to list if user has access
-                    if int(access_control[-1]) or int(access_control[user_index]):
-                        collections.append(collection)
-                        if len(collections) >= limit:
-                            # Extract token from last result
-                            if i < len(temp_collections) - 1:
-                                next_token = hit_token
-                                break
-                except KeyError:
-                    logger.error(
-                        f"No access control found for collection {collection['id']}"
-                    )
-
-            # If collections now less than limit and more results, will need to run search again, giving next_token
-            if len(collections) >= limit or not next_token:
-                # TODO: implement smarter token logic to return token of last returned ES entry
-                next_token = token
-                break
-            token = next_token
+        )
 
         links = [
             {"rel": Relations.root.value, "type": MimeTypes.json, "href": base_url},
@@ -441,9 +409,7 @@ class CoreClient(AsyncBaseCoreClient):
             # Get access control array for each catalog
             try:
                 logger.info(catalog)
-                access_control = catalog["access_control_workspaces"]
-                catalog.pop("access_control_owner")
-                catalog.pop("access_control_workspaces")
+                access_control = catalog["_sfapi_internal"]["access"]
                 # Check access control
                 if not int(access_control[-1]):  # Catalog is private
                     if username == "":  # User is not logged in
@@ -459,57 +425,19 @@ class CoreClient(AsyncBaseCoreClient):
                         )
             except KeyError:
                 logger.error(f"No access control found for catalog {catalog['id']}")
-                if username == "":  # User is not logged in
-                    raise HTTPException(
-                        status_code=401, detail="User is not authenticated"
-                    )
-                else:  # User is logged in but still can't determine access
-                    raise HTTPException(
-                        status_code=403,
-                        detail="User does not have access to this Catalog",
-                    )
+                return Catalogs(catalogs=[], links=[])
 
-        catalogs = []
-
-        count = 0
-        while True:
-            logger.info("In for loop %s", count)
-            count += 1
-            # Search is run continually until limit is reached or no more results
-            temp_catalogs, next_token, hit_tokens = (
-                await self.database.get_all_catalogs(
-                    catalog_path=catalog_path,
-                    token=token,
-                    limit=limit,
-                    base_url=base_url,
-                    user_index=user_index,
-                    conformance_classes=self.conformance_classes(),
-                )
+        # Search is run continually until limit is reached or no more results
+        catalogs, next_token = (
+            await self.database.get_all_catalogs(
+                catalog_path=catalog_path,
+                token=token,
+                limit=limit,
+                base_url=base_url,
+                user_index=user_index,
+                conformance_classes=self.conformance_classes(),
             )
-
-            for i, (catalog, hit_token) in enumerate(zip(temp_catalogs, hit_tokens)):
-                # Get access control array for each catalog
-                try:
-                    logger.info(catalog)
-                    access_control = catalog["access_control_workspaces"]
-                    catalog.pop("access_control_owner")
-                    catalog.pop("access_control_workspaces")
-                    # Add catalog to list if user has access
-                    if int(access_control[-1]) or int(access_control[user_index]):
-                        catalogs.append(catalog)
-                        if len(catalogs) >= limit:
-                            if i < len(temp_catalogs) - 1:
-                                # Extract token from last result
-                                next_token = hit_token
-                                break
-                except KeyError:
-                    logger.error(f"No access control found for catalog {catalog['id']}")
-
-            # If catalogs now less than limit and more results, will need to run search again, giving next_token
-            if len(catalogs) >= limit or not next_token:
-                # TODO: implement smarter token logic to return token of last returned ES entry
-                break
-            token = next_token
+        )
 
         links = [
             {"rel": Relations.root.value, "type": MimeTypes.json, "href": base_url},
@@ -559,9 +487,7 @@ class CoreClient(AsyncBaseCoreClient):
         user_index = hash_to_index(username)
         # Get access control array for each collection
         try:
-            access_control = collection["access_control_workspaces"]
-            collection.pop("access_control_owner")
-            collection.pop("access_control_workspaces")
+            access_control = collection["_sfapi_internal"]["access"]
             # Check access control
             if not int(access_control[-1]):  # Collection is private
                 if username == "":  # User is not logged in
@@ -624,9 +550,7 @@ class CoreClient(AsyncBaseCoreClient):
         user_index = hash_to_index(username)
         # Get access control array for each catalog
         try:
-            access_control = catalog["access_control_workspaces"]
-            catalog.pop("access_control_owner")
-            catalog.pop("access_control_workspaces")
+            access_control = catalog["_sfapi_internal"]["access"]
             # Check access control
             if not int(access_control[-1]):  # Catalog is private
                 if username == "":  # User is not logged in
@@ -655,15 +579,14 @@ class CoreClient(AsyncBaseCoreClient):
             base_url=base_url,
             limit=NUMBER_OF_CATALOG_COLLECTIONS,
             token=None,
+            user_index=user_index,
         )
 
         # Check if current user has access to each collection
         for collection in collections[:]:
             # Get access control array for each collection
             try:
-                access_control = collection["access_control_workspaces"]
-                collection.pop("access_control_owner")
-                collection.pop("access_control_workspaces")
+                access_control = collection["_sfapi_internal"]["access"]
                 # Remove collection from list if user does not have access
                 if not int(access_control[-1]) and not int(access_control[user_index]):
                     collections.remove(collection)
@@ -682,9 +605,7 @@ class CoreClient(AsyncBaseCoreClient):
         for sub_catalog in sub_catalogs[:]:
             # Get access control array for each catalog
             try:
-                access_control = sub_catalog["access_control_workspaces"]
-                sub_catalog.pop("access_control_owner")
-                sub_catalog.pop("access_control_workspaces")
+                access_control = sub_catalog["_sfapi_internal"]["access"]
                 # Remove catalog from list if user does not have access
                 if not int(access_control[-1]) and not int(access_control[user_index]):
                     sub_catalogs.remove(sub_catalog)
@@ -751,7 +672,7 @@ class CoreClient(AsyncBaseCoreClient):
 
         # Get access control array for the collection
         try:
-            access_control = collection["access_control_workspaces"]
+            access_control = collection["_sfapi_internal"]["access"]
             # Check access control
             if not int(access_control[-1]):  # Collection is private
                 if username == "":  # User is not logged in
@@ -802,6 +723,7 @@ class CoreClient(AsyncBaseCoreClient):
             limit=limit,
             sort=None,
             token=token,  # type: ignore
+            user_index=user_index,
             collection_ids=[collection_id],
         )
 
@@ -874,7 +796,7 @@ class CoreClient(AsyncBaseCoreClient):
         user_index = hash_to_index(username)
         # Get access control array for each collection
         try:
-            access_control = collection["access_control_workspaces"]
+            access_control = collection["_sfapi_internal"]["access"]
             # Check access control
             if not int(access_control[-1]):  # Collection is private
                 if username == "":  # User is not logged in
@@ -1175,7 +1097,7 @@ class CoreClient(AsyncBaseCoreClient):
             catalog = await self.database.find_catalog(catalog_path=catalog_path)
             # Get access control array for each catalog
             try:
-                access_control = catalog["access_control_workspaces"]
+                access_control = catalog["_sfapi_internal"]["access"]
                 # Remove catalog from list if user does not have access
                 if not int(access_control[-1]) and not int(access_control[user_index]):
                     search_request.catalog_paths.remove(catalog_path)
@@ -1192,7 +1114,7 @@ class CoreClient(AsyncBaseCoreClient):
                 )
                 # Get access control array for each collection
                 try:
-                    access_control = collection["access_control_workspaces"]
+                    access_control = collection["_sfapi_internal"]["access"]
                     # Remove catalog from list if user does not have access
                     if not int(access_control[-1]) and not int(
                         access_control[user_index]
@@ -1232,6 +1154,7 @@ class CoreClient(AsyncBaseCoreClient):
                     limit=limit,
                     token=token,  # type: ignore
                     sort=sort,
+                    user_index=user_index,
                     collection_ids=search_request.collections,
                     catalog_paths=search_request.catalog_paths,
                 )
@@ -1251,7 +1174,7 @@ class CoreClient(AsyncBaseCoreClient):
                     )
                     # Get access control array for this collection
                     try:
-                        access_control = collection["access_control_workspaces"]
+                        access_control = collection["_sfapi_internal"]["access"]
                         # Append item to list if user has access
                         if int(access_control[-1]) or int(access_control[user_index]):
                             items.append(item)
@@ -1272,7 +1195,7 @@ class CoreClient(AsyncBaseCoreClient):
                         catalog_path=item_catalog_path
                     )
                     try:
-                        access_control = catalog["access_control_workspaces"]
+                        access_control = catalog["_sfapi_internal"]["access"]
                         # Append item to list if user has access
                         if int(access_control[-1]) or int(access_control[user_index]):
                             items.append(item)
@@ -1493,7 +1416,7 @@ class CoreClient(AsyncBaseCoreClient):
         catalog = await self.database.find_catalog(catalog_path=catalog_path)
         # Get access control array for each catalog
         try:
-            access_control = catalog["access_control_workspaces"]
+            access_control = catalog["_sfapi_internal"]["access"]
             # Check access control
             if not int(access_control[-1]):  # Collection is private
                 if username == "":  # User is not logged in
@@ -1528,7 +1451,7 @@ class CoreClient(AsyncBaseCoreClient):
             )
             # Get access control array for each collection
             try:
-                access_control = collection["access_control_workspaces"]
+                access_control = collection["_sfapi_internal"]["access"]
                 # Remove catalog from list if user does not have access
                 if not int(access_control[-1]) and not int(access_control[user_index]):
                     collections.remove(collection_id)
@@ -1629,7 +1552,7 @@ class CoreClient(AsyncBaseCoreClient):
                     )
                     # Get access control array for this collection
                     try:
-                        access_control = collection["access_control_workspaces"]
+                        access_control = collection["_sfapi_internal"]["access"]
                         # Append item to list if user has access
                         if int(access_control[-1]) or int(access_control[user_index]):
                             items.append(item)
@@ -1649,7 +1572,7 @@ class CoreClient(AsyncBaseCoreClient):
                         catalog_path=item_catalog_path
                     )
                     try:
-                        access_control = catalog["access_control_workspaces"]
+                        access_control = catalog["_sfapi_internal"]["access"]
                         # Append item to list if user has access
                         if int(access_control[-1]) or int(access_control[user_index]):
                             items.append(item)
@@ -1768,7 +1691,7 @@ class TransactionsClient(AsyncBaseTransactionsClient):
         collection = await self.database.find_collection(
             collection_id=collection_id, catalog_path=catalog_path
         )
-        owner = collection["access_control_owner"]
+        owner = collection["_sfapi_internal"]["owner"]
 
         if owner != workspace:
             raise HTTPException(
@@ -1842,7 +1765,7 @@ class TransactionsClient(AsyncBaseTransactionsClient):
         collection = await self.database.find_collection(
             collection_id=collection_id, catalog_path=catalog_path
         )
-        collection_owner = collection["access_control_owner"]
+        collection_owner = collection["_sfapi_internal"]["owner"]
 
         # Confirm that the workspace provides correct access to the part of the catalogue to be altered
         if workspace != collection_owner:
@@ -1899,7 +1822,7 @@ class TransactionsClient(AsyncBaseTransactionsClient):
         collection = await self.database.find_collection(
             catalog_path=catalog_path, collection_id=collection_id
         )
-        owner = collection["access_control_owner"]
+        owner = collection["_sfapi_internal"]["owner"]
 
         if owner != workspace:
             raise HTTPException(
@@ -1960,11 +1883,11 @@ class TransactionsClient(AsyncBaseTransactionsClient):
         # Confirm user has access to parent catalog
         # Retrive catalog to confirm owning workspace
         catalog = await self.database.find_catalog(catalog_path=catalog_path)
-        owner = catalog["access_control_owner"]
+        owner = catalog["_sfapi_internal"]["owner"]
         # Set to private for the minute, in future this should take the parent access, but there are complexities here
         # e.g. as access to a collection implies access to a parent, there could be cross-permissions that are
         # not desired by the users creating new collections
-        # access_control = catalog["access_control_workspaces"]
+        # access_control = catalog["_sfapi_internal"]["access"]
 
         if owner != workspace:
             raise HTTPException(
@@ -2027,8 +1950,8 @@ class TransactionsClient(AsyncBaseTransactionsClient):
         old_collection = await self.database.find_collection(
             collection_id=collection_id, catalog_path=catalog_path
         )
-        collection_owner = old_collection["access_control_owner"]
-        access_control = old_collection["access_control_workspaces"]
+        collection_owner = old_collection["_sfapi_internal"]["owner"]
+        access_control = old_collection["_sfapi_internal"]["access"]
 
         # Confirm that the workspace provides correct access to the part of the catalogue to be altered
         if workspace != collection_owner:
@@ -2081,7 +2004,7 @@ class TransactionsClient(AsyncBaseTransactionsClient):
         collection = await self.database.find_collection(
             catalog_path=catalog_path, collection_id=collection_id
         )
-        owner = collection["access_control_owner"]
+        owner = collection["_sfapi_internal"]["owner"]
 
         if owner != workspace:
             raise HTTPException(
@@ -2121,7 +2044,7 @@ class TransactionsClient(AsyncBaseTransactionsClient):
 
         # Retrive catalog to confirm owning workspace
         catalog = await self.database.find_catalog(catalog_path=catalog_path)
-        owner = catalog["access_control_owner"]
+        owner = catalog["_sfapi_internal"]["owner"]
 
         if owner != workspace:
             raise HTTPException(
@@ -2134,6 +2057,7 @@ class TransactionsClient(AsyncBaseTransactionsClient):
 
         await self.database.update_catalog_access_control(
             catalog_path=catalog_path,
+            owner=owner,
             access_control=user_access_bitstring,
         )
 
@@ -2165,7 +2089,7 @@ class TransactionsClient(AsyncBaseTransactionsClient):
         collection = await self.database.find_collection(
             catalog_path=catalog_path, collection_id=collection_id
         )
-        owner = collection["access_control_owner"]
+        owner = collection["_sfapi_internal"]["owner"]
 
         if owner != workspace:
             raise HTTPException(
@@ -2180,6 +2104,7 @@ class TransactionsClient(AsyncBaseTransactionsClient):
         await self.database.update_collection_access_control(
             catalog_path=catalog_path,
             collection_id=collection_id,
+            owner=owner,
             access_control=user_access_bitstring,
         )
 
@@ -2239,11 +2164,11 @@ class TransactionsClient(AsyncBaseTransactionsClient):
         # Retrive catalog to confirm owning workspace
         if catalog_path:
             parent_catalog = await self.database.find_catalog(catalog_path=catalog_path)
-            owner = parent_catalog["access_control_owner"]
+            owner = parent_catalog["_sfapi_internal"]["owner"]
             # Set to private for the minute, in future this should take the parent access, but there are complexities here
             # e.g. as access to a collection implies access to a parent, there could be cross-permissions that are
             # not desired by the users creating new catalogs
-            # access_control = catalog["access_control_workspaces"]
+            # access_control = catalog["_sfapi_internal"]["access"]
         else:
             owner = "default_workspace"
 
@@ -2307,8 +2232,8 @@ class TransactionsClient(AsyncBaseTransactionsClient):
 
         # Check the owner of the specified catalog
         old_catalog = await self.database.find_catalog(catalog_path=catalog_path)
-        catalog_owner = old_catalog["access_control_owner"]
-        access_control = old_catalog["access_control_workspaces"]
+        catalog_owner = old_catalog["_sfapi_internal"]["owner"]
+        access_control = old_catalog["_sfapi_internal"]["access"]
 
         # Confirm that the workspace provides correct access to the part of the catalogue to be altered
         if workspace != catalog_owner:
@@ -2352,7 +2277,7 @@ class TransactionsClient(AsyncBaseTransactionsClient):
         # Confirm user has access to this part of the catalog
         # Retrive catalog to confirm owning workspace
         catalog = await self.database.find_catalog(catalog_path=catalog_path)
-        owner = catalog["access_control_owner"]
+        owner = catalog["_sfapi_internal"]["owner"]
 
         if owner != workspace:
             raise HTTPException(
@@ -2578,9 +2503,7 @@ class EsAsyncCollectionSearchClient(AsyncCollectionSearchClient):
 
             # Get access control array for each catalog
             try:
-                access_control = catalog["access_control_workspaces"]
-                catalog.pop("access_control_owner")
-                catalog.pop("access_control_workspaces")
+                access_control = catalog["_sfapi_internal"]["access"]
                 # Check access control
                 if not int(access_control[-1]):  # Catalog is private
                     if username == "":
@@ -2632,49 +2555,17 @@ class EsAsyncCollectionSearchClient(AsyncCollectionSearchClient):
         if search_request.limit:
             limit = search_request.limit
 
-        collections = []
-        count = 0
-        while True:
-            logger.info("In for loop %s", count)
-            count += 1
-            temp_collections, _, next_token, hit_tokens = (
-                await self.database.execute_collection_search(
-                    search=search,
-                    limit=limit,
-                    base_url=base_url,
-                    token=token,
-                    sort=sort,
-                    catalog_path=catalog_path,
-                )
+        collections, _, next_token = (
+            await self.database.execute_collection_search(
+                search=search,
+                limit=limit,
+                base_url=base_url,
+                token=token,
+                user_index=user_index,
+                sort=sort,
+                catalog_path=catalog_path,
             )
-
-            # Filter results to those that are accessible to the user
-            for i, (collection, hit_token) in enumerate(
-                zip(temp_collections, hit_tokens)
-            ):
-                # Get access control array for this collection
-                try:
-                    access_control = collection["access_control_workspaces"]
-                    collection.pop("access_control_owner")
-                    collection.pop("access_control_workspaces")
-                    # Append collection to list if user has access
-                    if int(access_control[-1]) or int(access_control[user_index]):
-                        collections.append(collection)
-                        if len(collections) >= limit:
-                            if i < len(temp_collections) - 1:
-                                # Extract token from last result
-                                next_token = hit_token
-                                break
-                except KeyError:
-                    logger.error(
-                        f"Access control not found for collection {collection['id']}"
-                    )
-
-            # If collections now less than limit and more results, will need to run search again, giving next_token
-            if len(collections) >= limit or not next_token:
-                # TODO: implement smarter token logic to return token of last returned ES entry
-                break
-            token = next_token
+        )
 
         links = []
         if next_token:
@@ -2821,6 +2712,7 @@ class EsAsyncDiscoverySearchClient(AsyncDiscoverySearchClient):
                     token=token,
                     sort=None,  # use default sort for the minute
                     base_url=base_url,
+                    user_index=user_index,
                     conformance_classes=self.conformance_classes(),
                 )
             )
@@ -2831,7 +2723,7 @@ class EsAsyncDiscoverySearchClient(AsyncDiscoverySearchClient):
             ):
                 # Get access control array for this collection
                 try:
-                    access_control = data["access_control_workspaces"]
+                    access_control = data["_sfapi_internal"]["access"]
                     data.pop("access_control_owner")
                     data.pop("access_control_workspaces")
                     # Append collection to list if user has access

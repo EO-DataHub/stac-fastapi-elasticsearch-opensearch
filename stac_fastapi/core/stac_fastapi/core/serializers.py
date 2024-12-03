@@ -174,6 +174,9 @@ class CollectionSerializer(Serializer):
         )
         collection.setdefault("assets", {})
 
+        # Remove internal access control fields
+        collection.pop("_sfapi_internal", None)
+
         # Create the collection links using CollectionLinks
         collection_links = CollectionLinks(
             catalog_path=catalog_path, collection_id=collection_id, base_url=base_url
@@ -243,6 +246,9 @@ class CatalogSerializer(Serializer):
         catalog.setdefault("stac_version", "")
         catalog.setdefault("title", "")
         catalog.setdefault("description", "")
+
+        # Remove internal access control fields
+        catalog.pop("_sfapi_internal", None)
 
         # Set conformance for catalog
         catalog.update({"conformsTo": conformance_classes})
