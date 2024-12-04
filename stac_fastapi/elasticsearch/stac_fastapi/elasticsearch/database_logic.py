@@ -744,9 +744,7 @@ class DatabaseLogic:
                 catalog_path_list = catalog_path.split(CATALOG_SEPARATOR)
                 catalog_path_list.reverse()
                 catalog_path = "/".join(catalog_path_list)
-                if int(hit["_source"]["_sfapi_internal"]["access"][-1]) or int(
-                    hit["_source"]["_sfapi_internal"]["access"][user_index]
-                ):
+                if hit["_source"]["_sfapi_internal"]["inf_public"]:
                     collections.append(
                         self.collection_serializer.db_to_stac(
                             collection=hit["_source"],
@@ -809,9 +807,7 @@ class DatabaseLogic:
             collections = []
 
             for hit in hits:
-                if int(hit["_source"]["_sfapi_internal"]["access"][-1]) or int(
-                    hit["_source"]["_sfapi_internal"]["access"][user_index]
-                ):
+                if hit["_source"]["_sfapi_internal"]["inf_public"]:
                     collections.append(
                         self.collection_serializer.db_to_stac(
                             catalog_path=catalog_path,
@@ -894,9 +890,7 @@ class DatabaseLogic:
                     catalog_index_list = catalog_index.split(CATALOG_SEPARATOR)
                     catalog_index_list.reverse()
                     catalog_index_list.append(catalog_id)
-                    if int(hit["_source"]["_sfapi_internal"]["access"][-1]) or int(
-                        hit["_source"]["_sfapi_internal"]["access"][user_index]
-                    ):
+                    if hit["_source"]["_sfapi_internal"]["inf_public"]:
                         catalog_indices_list.append(catalog_index_list)
                         allowed_hits.append(hit)
                         if len(allowed_hits) == limit:
@@ -909,9 +903,7 @@ class DatabaseLogic:
                             break
                 except IndexError:
                     catalog_index_list = [catalog_id]
-                    if int(hit["_source"]["_sfapi_internal"]["access"][-1]) or int(
-                        hit["_source"]["_sfapi_internal"]["access"][user_index]
-                    ):
+                    if hit["_source"]["_sfapi_internal"]["inf_public"]:
                         catalog_indices_list.append(catalog_index_list)
                         allowed_hits.append(hit)
                         if len(allowed_hits) == limit:
@@ -992,18 +984,12 @@ class DatabaseLogic:
             sub_catalogs = []
             for sub_catalog in sub_data_catalogs_and_collections[0]:
                 if sub_catalog["_source"]:
-                    if int(sub_catalog["_source"]["_sfapi_internal"]["access"][-1]) or int(
-                        sub_catalog["_source"]["_sfapi_internal"]["access"][user_index]
-                    ):
+                    if hit["_source"]["_sfapi_internal"]["inf_public"]:
                         sub_catalogs.append(sub_catalog["_source"])
             # Extract collections
             for collection in sub_data_catalogs_and_collections[1]:
                 if collection["_source"]:
-                    if int(
-                        collection["_source"]["_sfapi_internal"]["access"][-1]
-                    ) or int(
-                        collection["_source"]["_sfapi_internal"]["access"][user_index]
-                    ):
+                    if hit["_source"]["_sfapi_internal"]["inf_public"]:
                         collections.append(collection["_source"])
             catalogs.append(
                 self.catalog_serializer.db_to_stac(
@@ -1585,8 +1571,7 @@ class DatabaseLogic:
                     catalog_path=item_catalog_path,
                     collection_id=hit["_source"]["collection"],
                 )
-                access_control = collection["_sfapi_internal"]["access"]
-                if int(access_control[-1]) or int(access_control[user_index]):
+                if collection["_sfapi_internal"]["inf_public"]:
                     items_and_cat_paths.append((hit["_source"], item_catalog_path))
                     if len(items_and_cat_paths) == limit:
                         token = None
@@ -1631,7 +1616,6 @@ class DatabaseLogic:
         base_url: str,
         token: Optional[str],
         sort: Optional[Dict[str, Dict[str, str]]],
-        user_index: int,
         catalog_path: str = None,
         ignore_unavailable: bool = True,
     ) -> Tuple[Iterable[Dict[str, Any]], Optional[int], Optional[str]]:
@@ -1704,9 +1688,7 @@ class DatabaseLogic:
 
             hits = es_response["hits"]["hits"]
             for i, hit in enumerate(hits):
-                if int(hit["_source"]["_sfapi_internal"]["access"][-1]) or int(
-                    hit["_source"]["_sfapi_internal"]["access"][user_index]
-                ):
+                if hit["_source"]["_sfapi_internal"]["inf_public"]:
                     catalog_path = hit["_index"].split("_", 1)[1]
                     catalog_path_list = catalog_path.split(CATALOG_SEPARATOR)
                     catalog_path_list.reverse()
@@ -2071,9 +2053,9 @@ class DatabaseLogic:
     async def update_parent_access_control(
         self,
         catalog_path_list: List[str],
-        new_workspaces_bitstring: str,
+        is_public: bool,
     ):
-        """Update the access control bitstring for the parent catalog(s)."""
+        """Update the access control for the parent catalog(s)."""
         # Check if updating for collection or catalog
         # Nesting collections is not supported
 
@@ -2087,16 +2069,13 @@ class DatabaseLogic:
                 ),
                 id=catalog_id,
             )
-            parent_catalog_owner = catalog["_source"]["_sfapi_internal"]["owner"]
-            old_workspaces_bitstring = catalog["_source"]["_sfapi_internal"]["access"]
-            new_workspaces_bitstring = self._combine_bitstrings(
-                old_workspaces_bitstring, new_workspaces_bitstring
-            )
+            # Note this will never un-publish a parent catalog, that will need to be done manually
+            current_annotations = catalog["_source"]["_sfapi_internal"]
+            old_public = catalog["_source"]["_sfapi_internal"]["inf_public"]
+            new_public = old_public or is_public
+            current_annotations["inf_public"] = new_public
             annotations = {
-                "_sfapi_internal": {
-                    "owner": parent_catalog_owner,
-                    "access": new_workspaces_bitstring,
-                }
+                "_sfapi_internal": current_annotations
             }
             _ = await self.client.update(
                 index=index_catalogs_by_catalog_id(
@@ -2109,7 +2088,7 @@ class DatabaseLogic:
 
             await self.update_parent_access_control(
                 catalog_path_list=catalog_path_list[:-1],
-                new_workspaces_bitstring=new_workspaces_bitstring,
+                is_public=new_public,
             )
 
         elif len(catalog_path_list) == 1:
@@ -2119,17 +2098,12 @@ class DatabaseLogic:
                 index=ROOT_CATALOGS_INDEX,
                 id=catalog_id,
             )
-            parent_catalog_owner = catalog["_source"]["_sfapi_internal"]["owner"]
-            old_workspaces_bitstring = catalog["_source"]["_sfapi_internal"]["access"]
-            new_workspaces_bitstring = self._combine_bitstrings(
-                old_workspaces_bitstring, new_workspaces_bitstring
-            )
-
+            current_annotations = catalog["_source"]["_sfapi_internal"]
+            old_public = catalog["_source"]["_sfapi_internal"]["inf_public"]
+            new_public = old_public or is_public
+            current_annotations["inf_public"] = new_public
             annotations = {
-                "_sfapi_internal": {
-                    "owner": parent_catalog_owner,
-                    "access": new_workspaces_bitstring,
-                }
+                "_sfapi_internal": current_annotations
             }
 
             _ = await self.client.update(
@@ -2144,7 +2118,7 @@ class DatabaseLogic:
         catalog_path: str,
         collection: Collection,
         owner: str,
-        access_control: str,
+        is_public: bool,
         refresh: bool = False,
     ):
         """Database logic for creating one item.
@@ -2153,7 +2127,7 @@ class DatabaseLogic:
             catalog_path (str): The parent catalog into which the Collection will be inserted.
             collection (Collection): The collection to be created.
             owner (str): Owner for the collection
-            access_control (str): String defining String bitstring defining data owner and workpace access
+            is_public (bool): Whether this collection is public
             refresh (bool, optional): Refresh the index after performing the operation. Defaults to False.
 
         Raises:
@@ -2181,7 +2155,7 @@ class DatabaseLogic:
         annotations = {
             "_sfapi_internal": {
                 "owner": owner,
-                "access": access_control,
+                "inf_public": is_public
             }
         }
         await self.client.update(
@@ -2199,7 +2173,7 @@ class DatabaseLogic:
         # Update the access control bitstring for the parent catalog(s)
         await self.update_parent_access_control(
             catalog_path_list=catalog_path_list,
-            new_workspaces_bitstring=(access_control),
+            is_public=is_public,
         )
 
         collection = await self.client.get(
@@ -2217,7 +2191,7 @@ class DatabaseLogic:
         collection_id: str,
         catalog_path: str,
         owner: str,
-        access_control: str,
+        is_public: bool,
         refresh: bool = False,
     ):
         # Record access control bitstring for this document
@@ -2231,7 +2205,8 @@ class DatabaseLogic:
         annotations = {
             "_sfapi_internal": {
                 "owner": owner,
-                "access": access_control,
+                "inf_public": is_public,
+                "rec_public": is_public
             }
         }
 
@@ -2246,7 +2221,7 @@ class DatabaseLogic:
         if catalog_path:
             await self.update_parent_access_control(
                 catalog_path_list=catalog_path_list,
-                new_workspaces_bitstring=access_control,
+                is_public=is_public,
             )
 
     async def find_collection(
@@ -2296,7 +2271,7 @@ class DatabaseLogic:
         collection_id: str,
         collection: Collection,
         owner: str,
-        access_control: str,
+        is_public: bool,
         refresh: bool = False,
     ):
         """Update a collection from the database.
@@ -2307,7 +2282,7 @@ class DatabaseLogic:
             collection_id (str): The ID of the collection to be updated.
             collection (Collection): The Collection object to be used for the update.
             owner (str): Owner for this collection
-            access_control (str): String defining String bitstring defining data owner and workpace access
+            is_public (bool): Whether this collection is public
 
         Raises:
             NotFoundError: If the collection with the given `collection_id` is not
@@ -2328,7 +2303,7 @@ class DatabaseLogic:
                 collection=collection,
                 refresh=refresh,
                 owner=owner,
-                access_control=access_control,
+                is_public=is_public,
             )
             dest_index = index_by_collection_id(
                 collection_id=collection["id"], catalog_path_list=catalog_path_list
@@ -2373,7 +2348,7 @@ class DatabaseLogic:
             annotations = {
                 "_sfapi_internal": {
                     "owner": owner,
-                    "access": access_control,
+                    "inf_public": is_public
                 }
             }
             await self.client.update(
@@ -2529,7 +2504,7 @@ class DatabaseLogic:
         self,
         catalog: Catalog,
         owner: str,
-        access_control: str,
+        is_public: bool,
         catalog_path: Optional[str] = None,
         refresh: bool = False,
     ):
@@ -2538,7 +2513,7 @@ class DatabaseLogic:
         Args:
             catalog (Catalog): The Catalog object to be created.
             owner (str): Owner for this collection
-            access_control (str): String defining String bitstring defining data owner and workpace access
+            is_public (bool): Whether this collection is public
             catalog_path (Optional[str]): The path to the parent catalog into which the new catalog will be inserted. Default is None.
             refresh (bool, optional): Whether to refresh the index after the creation. Default is False.
 
@@ -2574,7 +2549,7 @@ class DatabaseLogic:
         annotations = {
             "_sfapi_internal": {
                 "owner": owner,
-                "access": access_control,
+                "inf_public": is_public
             }
         }
 
@@ -2594,14 +2569,14 @@ class DatabaseLogic:
         if catalog_path:
             await self.update_parent_access_control(
                 catalog_path_list=catalog_path_list,
-                new_workspaces_bitstring=(access_control),
+                is_public=is_public,
             )
 
     async def update_child_access_control(
         self,
         catalog_path: str,
         owner: str,
-        access_control: str,
+        is_public: bool,
         refresh: bool = False,
     ):
         """
@@ -2627,12 +2602,11 @@ class DatabaseLogic:
         annotations = {
             "_sfapi_internal": {
                 "owner": owner,
-                "access": access_control,
+                "inf_public": is_public,
+                "rec_public": is_public
             }
         }
 
-
-        
 
         # Get all documents in the chosen index
         query = {
@@ -2658,7 +2632,7 @@ class DatabaseLogic:
             )
             new_catalog_path = f"{catalog_path}/{catalog_id}"
             await self.update_child_access_control(
-                new_catalog_path, owner, access_control, refresh
+                new_catalog_path, owner, is_public, refresh
             )
 
         if col_index:
@@ -2683,7 +2657,7 @@ class DatabaseLogic:
         self,
         catalog_path: str,
         owner: str,
-        access_control: str,
+        is_public: bool,
         refresh: bool = False,
     ):
         # Record access control bitstring for this document
@@ -2702,7 +2676,8 @@ class DatabaseLogic:
         annotations = {
             "_sfapi_internal": {
                 "owner": owner,
-                "access": access_control,
+                "inf_public": is_public,
+                "rec_public": is_public
             }
         }
 
@@ -2717,10 +2692,10 @@ class DatabaseLogic:
         if catalog_path:
             await self.update_parent_access_control(
                 catalog_path_list=catalog_path_list,
-                new_workspaces_bitstring=access_control,
+                is_public=is_public,
             )
         # Update recursive access for nested catalogs
-        await self.update_child_access_control(catalog_path, owner, access_control, refresh)
+        await self.update_child_access_control(catalog_path, owner, is_public, refresh)
 
     async def find_catalog(self, catalog_path: str) -> Catalog:
         """Find and return a catalog from the database.
@@ -2902,7 +2877,7 @@ class DatabaseLogic:
             )
 
     async def update_catalog(
-        self, catalog_path: str, catalog: Catalog, owner: str, access_control: str, refresh: bool = False
+        self, catalog_path: str, catalog: Catalog, owner: str, is_public: bool, refresh: bool = False
     ):
         """Update a collection from the database.
 
@@ -2910,6 +2885,8 @@ class DatabaseLogic:
             self: The instance of the object calling this function.
             catalog_path (str): The path and ID of the catalog to be updated.
             catalog (Catalog): The Catalog object to be used for the update.
+            owner (str): Owner for this catalog
+            is_public (bool): Whether this catalog is public
             refresh (bool): Whether to refresh the index after the deletion (default: False).
 
         Raises:
@@ -2940,7 +2917,7 @@ class DatabaseLogic:
                 new_catalog_path_list.append(catalog["id"])
 
             await self.create_catalog(
-                catalog_path=new_catalog_parent_path, catalog=catalog, owner=owner, access_control=access_control, refresh=refresh
+                catalog_path=new_catalog_parent_path, catalog=catalog, owner=owner, is_public=is_public, refresh=refresh
             )
 
             # Recursively update all catalogs within this catalog
@@ -3114,7 +3091,7 @@ class DatabaseLogic:
             annotations = {
                 "_sfapi_internal": {
                     "owner": owner,
-                    "access": access_control,
+                    "inf_public": is_public
                 }
             }
 
@@ -3287,7 +3264,6 @@ class DatabaseLogic:
         base_url: str,
         token: Optional[str],
         sort: Optional[Dict[str, Dict[str, str]]],
-        user_index: str,
         ignore_unavailable: bool = True,
         conformance_classes: list = [],
     ) -> Tuple[Iterable[Dict[str, Any]], Optional[int], Optional[str]]:
@@ -3352,9 +3328,7 @@ class DatabaseLogic:
             hits = es_response["hits"]["hits"]
 
             for hit in hits:
-                if int(hit["_source"]["_sfapi_internal"]["access"][-1]) or int(
-                    hit["_source"]["_sfapi_internal"]["access"][user_index]
-                ):
+                if hit["_source"]["_sfapi_internal"]["inf_public"]:
                     if hit["_source"]["type"] == "Catalog":
                         catalog_hits.append(hit)
                         # Calculate catalog path for found catalog
