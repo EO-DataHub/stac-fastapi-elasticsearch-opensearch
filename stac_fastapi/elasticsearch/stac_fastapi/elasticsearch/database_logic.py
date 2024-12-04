@@ -836,10 +836,11 @@ class DatabaseLogic:
         if catalog_path:
             # Create list of nested catalog ids
             catalog_path_list = catalog_path.split("/")
-            params_index = index_catalogs_by_catalog_id(catalog_path_list=catalog_path_list)
+            
         else:
             catalog_path_list = None
-            params_index = ROOT_CATALOGS_INDEX
+
+        params_index = index_catalogs_by_catalog_id(catalog_path_list=catalog_path_list)
 
         search_after = None
         if token:
@@ -2102,8 +2103,9 @@ class DatabaseLogic:
         self,
         catalog_path: str,
         collection: Collection,
-        owner: str,
-        is_public: bool,
+        owner: str = None,
+        is_public: bool = None,
+        annotations: dict = {},
         refresh: bool = False,
     ):
         """Database logic for creating one item.
@@ -2113,6 +2115,7 @@ class DatabaseLogic:
             collection (Collection): The collection to be created.
             owner (str): Owner for the collection
             is_public (bool): Whether this collection is public
+            annotations (dict): The annotations for the previous instance of this collection to be maintained
             refresh (bool, optional): Refresh the index after performing the operation. Defaults to False.
 
         Raises:
@@ -2136,13 +2139,13 @@ class DatabaseLogic:
         )
 
         # Record access control bitstring for this document
-        # Record access control bitstring for this document
-        annotations = {
-            "_sfapi_internal": {
-                "owner": owner,
-                "inf_public": is_public
+        if not annotations:
+            annotations = {
+                "_sfapi_internal": {
+                    "owner": owner,
+                    "inf_public": is_public
+                }
             }
-        }
         await self.client.update(
             index=index_collections_by_catalog_id(catalog_path_list=catalog_path_list),
             id=collection_id,
@@ -2255,8 +2258,7 @@ class DatabaseLogic:
         catalog_path: str,
         collection_id: str,
         collection: Collection,
-        owner: str,
-        is_public: bool,
+        annotations: dict,
         refresh: bool = False,
     ):
         """Update a collection from the database.
@@ -2266,8 +2268,7 @@ class DatabaseLogic:
             catalog_path (str): The path of the catalog containing the collection to be updated, including parent catalogs, e.g. parentCat/cat
             collection_id (str): The ID of the collection to be updated.
             collection (Collection): The Collection object to be used for the update.
-            owner (str): Owner for this collection
-            is_public (bool): Whether this collection is public
+            annotations (dict): The annotations for the collection to be maintained.
 
         Raises:
             NotFoundError: If the collection with the given `collection_id` is not
@@ -2287,8 +2288,7 @@ class DatabaseLogic:
                 catalog_path=catalog_path,
                 collection=collection,
                 refresh=refresh,
-                owner=owner,
-                is_public=is_public,
+                annotations=annotations,
             )
             dest_index = index_by_collection_id(
                 collection_id=collection["id"], catalog_path_list=catalog_path_list
@@ -2329,13 +2329,6 @@ class DatabaseLogic:
                 refresh=refresh,
             )
 
-            # Record access control bitstring for this document
-            annotations = {
-                "_sfapi_internal": {
-                    "owner": owner,
-                    "inf_public": is_public
-                }
-            }
             await self.client.update(
                 index=index_collections_by_catalog_id(
                     catalog_path_list=catalog_path_list
@@ -2488,9 +2481,10 @@ class DatabaseLogic:
     async def create_catalog(
         self,
         catalog: Catalog,
-        owner: str,
-        is_public: bool,
+        owner: str = None,
+        is_public: bool = None,
         catalog_path: Optional[str] = None,
+        annotations: dict = {},
         refresh: bool = False,
     ):
         """Create a single catalog in the database.
@@ -2500,6 +2494,7 @@ class DatabaseLogic:
             owner (str): Owner for this collection
             is_public (bool): Whether this collection is public
             catalog_path (Optional[str]): The path to the parent catalog into which the new catalog will be inserted. Default is None.
+            annotations (dict): used when updating a catalog, to ensure annotations are maintained
             refresh (bool, optional): Whether to refresh the index after the creation. Default is False.
 
         Raises:
@@ -2531,12 +2526,13 @@ class DatabaseLogic:
         )
 
         # Record access control bitstring for this document
-        annotations = {
-            "_sfapi_internal": {
-                "owner": owner,
-                "inf_public": is_public
+        if not annotations:
+            annotations = {
+                "_sfapi_internal": {
+                    "owner": owner,
+                    "inf_public": is_public
+                }
             }
-        }
 
         await self.client.update(
             index=index,
@@ -2862,7 +2858,7 @@ class DatabaseLogic:
             )
 
     async def update_catalog(
-        self, catalog_path: str, catalog: Catalog, owner: str, is_public: bool, refresh: bool = False
+        self, catalog_path: str, catalog: Catalog, annotations: dict, refresh: bool = False
     ):
         """Update a collection from the database.
 
@@ -2870,8 +2866,7 @@ class DatabaseLogic:
             self: The instance of the object calling this function.
             catalog_path (str): The path and ID of the catalog to be updated.
             catalog (Catalog): The Catalog object to be used for the update.
-            owner (str): Owner for this catalog
-            is_public (bool): Whether this catalog is public
+            annotations (dict): The previous annotations for this catalog
             refresh (bool): Whether to refresh the index after the deletion (default: False).
 
         Raises:
@@ -2902,7 +2897,7 @@ class DatabaseLogic:
                 new_catalog_path_list.append(catalog["id"])
 
             await self.create_catalog(
-                catalog_path=new_catalog_parent_path, catalog=catalog, owner=owner, is_public=is_public, refresh=refresh
+                catalog_path=new_catalog_parent_path, catalog=catalog, annotations=annotations, refresh=refresh
             )
 
             # Recursively update all catalogs within this catalog
@@ -3072,13 +3067,6 @@ class DatabaseLogic:
                 document=catalog,
                 refresh=refresh,
             )
-            # Record access control bitstring for this document
-            annotations = {
-                "_sfapi_internal": {
-                    "owner": owner,
-                    "inf_public": is_public
-                }
-            }
 
             await self.client.update(
                 index=index_param,

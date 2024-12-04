@@ -1117,7 +1117,7 @@ class CoreClient(AsyncBaseCoreClient):
                 limit=limit,
                 token=token,  # type: ignore
                 sort=sort,
-                user_index=user_index,
+                username=username,
                 collection_ids=search_request.collections,
                 catalog_paths=search_request.catalog_paths,
             )
@@ -1436,7 +1436,7 @@ class CoreClient(AsyncBaseCoreClient):
                 sort=sort,
                 collection_ids=collections,
                 catalog_paths=[catalog_path],
-                user_index=user_index,
+                username=username,
             )
         )
 
@@ -1792,8 +1792,8 @@ class TransactionsClient(AsyncBaseTransactionsClient):
         old_collection = await self.database.find_collection(
             collection_id=collection_id, catalog_path=catalog_path
         )
-        collection_owner = old_collection["_sfapi_internal"]["owner"]
-        is_public = old_collection["_sfapi_internal"]["inf_public"]
+        annotations = old_collection["_sfapi_internal"]
+        collection_owner = annotations["owner"]
 
         # Confirm that the workspace provides correct access to the part of the catalogue to be altered
         if workspace != collection_owner:
@@ -1801,7 +1801,6 @@ class TransactionsClient(AsyncBaseTransactionsClient):
                 status_code=403,
                 detail=f"Workspace {workspace} does not have access to {catalog_path if catalog_path else 'top-level'} catalog",
             )
-        owner = collection_owner
 
         collection = self.database.collection_serializer.stac_to_db(
             collection, base_url
@@ -1810,8 +1809,7 @@ class TransactionsClient(AsyncBaseTransactionsClient):
             catalog_path=catalog_path,
             collection_id=collection_id,
             collection=collection,
-            owner=owner,
-            is_public=is_public,
+            annotations={"_sfapi_internal": annotations},
         )
 
         return CollectionSerializer.db_to_stac(
@@ -2060,7 +2058,8 @@ class TransactionsClient(AsyncBaseTransactionsClient):
 
         # Check the owner of the specified catalog
         old_catalog = await self.database.find_catalog(catalog_path=catalog_path)
-        catalog_owner = old_catalog["_sfapi_internal"]["owner"]
+        annotations = old_catalog["_sfapi_internal"]
+        catalog_owner = annotations["owner"]
 
         # Confirm that the workspace provides correct access to the part of the catalogue to be altered
         if workspace != catalog_owner:
@@ -2073,7 +2072,7 @@ class TransactionsClient(AsyncBaseTransactionsClient):
             catalog=catalog, base_url=base_url
         )
         # Set owner and access_control to that of before
-        await self.database.update_catalog(catalog_path=catalog_path, catalog=catalog, owner=workspace, is_public=is_public)
+        await self.database.update_catalog(catalog_path=catalog_path, catalog=catalog, annotations={"_sfapi_internal": annotations})
 
         # This catalog does not yet have any collections or sub-catalogs
         return CatalogSerializer.db_to_stac(
