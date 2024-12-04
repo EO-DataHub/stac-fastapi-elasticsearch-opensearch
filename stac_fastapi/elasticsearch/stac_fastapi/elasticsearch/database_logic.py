@@ -528,7 +528,7 @@ async def delete_item_index_by_catalog(catalog_path_list: List[str]):
 
     # Index by catalog path, then replace the catalog index with the items index
     name = index_catalogs_by_catalog_id(catalog_path_list=catalog_path_list).replace(CATALOGS_INDEX_PREFIX, ITEMS_INDEX_PREFIX)
-    name = name.replace("items_", f"items_*{GROUP_SEPARATOR}", 1)  # ensure we are looking in collections that sit within the specified catalog
+    name = name.replace("items_", f"items_*{GROUP_SEPARATOR}", 1) # ensure we are looking in collections that sit within the specified catalog
     resolved = await client.indices.resolve_index(name=name)
     if "aliases" in resolved and resolved["aliases"]:
         [alias] = resolved["aliases"]
