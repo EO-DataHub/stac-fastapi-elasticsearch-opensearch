@@ -516,7 +516,6 @@ async def delete_item_index(collection_id: str, catalog_path_list: List[str]):
         await client.indices.delete(index=name)
     await client.close()
 
-
 async def delete_item_index_by_catalog(catalog_path_list: List[str]):
     """Delete the index for items in a collection, specifying the catalog and top-level catalog.
 
@@ -528,12 +527,8 @@ async def delete_item_index_by_catalog(catalog_path_list: List[str]):
     client = AsyncElasticsearchSettings().create_client
 
     # Index by catalog path, then replace the catalog index with the items index
-    name = index_catalogs_by_catalog_id(catalog_path_list=catalog_path_list).replace(
-        CATALOGS_INDEX_PREFIX, ITEMS_INDEX_PREFIX
-    )
-    name = name.replace(
-        "items_", f"items_*{GROUP_SEPARATOR}", 1
-    )  # ensure we are looking in collections that sit within the specified catalog
+    name = index_catalogs_by_catalog_id(catalog_path_list=catalog_path_list).replace(CATALOGS_INDEX_PREFIX, ITEMS_INDEX_PREFIX)
+    name = name.replace("items_", f"items_*{GROUP_SEPARATOR}", 1)  # ensure we are looking in collections that sit within the specified catalog
     resolved = await client.indices.resolve_index(name=name)
     if "aliases" in resolved and resolved["aliases"]:
         [alias] = resolved["aliases"]
@@ -2944,9 +2939,7 @@ class DatabaseLogic:
             )
         # Remove index for collections in this index
         try:
-            await delete_collection_index_by_catalog(
-                catalog_path_list=catalog_path_list
-            )
+            await delete_collection_index_by_catalog(catalog_path_list=catalog_path_list)
         except NotFoundError:
             logger.warning(
                 f"Catalog {catalog_id} at {'path ' + '/'.join(catalog_path_list[:-1]) if len(catalog_path_list) > 1 else 'top-level'} has no collections, so index does not exist and cannot be deleted, continuing as normal."
