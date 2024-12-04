@@ -362,7 +362,7 @@ class CoreClient(AsyncBaseCoreClient):
 
         collections, next_token = (
             await self.database.get_all_collections(
-                token=token, limit=limit, base_url=base_url, user_index=user_index
+                token=token, limit=limit, base_url=base_url, username=username
             )
         )
 
@@ -435,7 +435,6 @@ class CoreClient(AsyncBaseCoreClient):
                 token=token,
                 limit=limit,
                 base_url=base_url,
-                user_index=user_index,
                 conformance_classes=self.conformance_classes(),
             )
         )
@@ -696,7 +695,7 @@ class CoreClient(AsyncBaseCoreClient):
             limit=limit,
             sort=None,
             token=token,  # type: ignore
-            user_index=user_index,
+            username=username,
             collection_ids=[collection_id],
         )
 
@@ -2389,6 +2388,7 @@ class EsAsyncCollectionSearchClient(AsyncCollectionSearchClient):
                 base_url=base_url,
                 token=token,
                 sort=sort,
+                username=username,
                 catalog_path=catalog_path,
             )
         )
@@ -2533,6 +2533,7 @@ class EsAsyncDiscoverySearchClient(AsyncDiscoverySearchClient):
                 limit=limit,
                 token=token,
                 sort=None,  # use default sort for the minute
+                username=username,
                 base_url=base_url,
                 conformance_classes=self.conformance_classes(),
             )

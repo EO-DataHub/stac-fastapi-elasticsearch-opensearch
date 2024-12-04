@@ -697,7 +697,7 @@ class DatabaseLogic:
     """CORE LOGIC"""
 
     async def get_all_collections(
-        self, token: Optional[str], limit: int, base_url: str, user_index: int
+        self, token: Optional[str], limit: int, base_url: str, username: str
     ) -> Tuple[List[Dict[str, Any]], Optional[str]]:
         """Retrieve a list of all collections from Elasticsearch, supporting pagination.
         This goes across all catalogs and top-level catalogs.
@@ -744,7 +744,7 @@ class DatabaseLogic:
                 catalog_path_list = catalog_path.split(CATALOG_SEPARATOR)
                 catalog_path_list.reverse()
                 catalog_path = "/".join(catalog_path_list)
-                if hit["_source"]["_sfapi_internal"]["inf_public"]:
+                if hit["_source"]["_sfapi_internal"]["owner"] == username or hit["_source"]["_sfapi_internal"]["inf_public"]:
                     collections.append(
                         self.collection_serializer.db_to_stac(
                             collection=hit["_source"],
@@ -804,17 +804,7 @@ class DatabaseLogic:
             )
             hits = response["hits"]["hits"]
 
-            collections = []
-
-            for hit in hits:
-                if hit["_source"]["_sfapi_internal"]["inf_public"]:
-                    collections.append(
-                        self.collection_serializer.db_to_stac(
-                            catalog_path=catalog_path,
-                            collection=hit["_source"],
-                            base_url=base_url,
-                        )
-                    )
+            collections = [hit["_source"] for hit in hits]
 
         except exceptions.NotFoundError:
             collections = []
@@ -826,7 +816,7 @@ class DatabaseLogic:
         token: Optional[str],
         limit: Optional[int],
         base_url: str,
-        user_index: int,
+        username: str,
         catalog_path: Optional[str] = None,
         conformance_classes: list = [],
     ) -> Tuple[List[Dict[str, Any]], Optional[str]]:
@@ -890,7 +880,7 @@ class DatabaseLogic:
                     catalog_index_list = catalog_index.split(CATALOG_SEPARATOR)
                     catalog_index_list.reverse()
                     catalog_index_list.append(catalog_id)
-                    if hit["_source"]["_sfapi_internal"]["inf_public"]:
+                    if hit["_source"]["_sfapi_internal"]["owner"] == username or hit["_source"]["_sfapi_internal"]["inf_public"]:
                         catalog_indices_list.append(catalog_index_list)
                         allowed_hits.append(hit)
                         if len(allowed_hits) == limit:
@@ -903,7 +893,7 @@ class DatabaseLogic:
                             break
                 except IndexError:
                     catalog_index_list = [catalog_id]
-                    if hit["_source"]["_sfapi_internal"]["inf_public"]:
+                    if hit["_source"]["_sfapi_internal"]["owner"] == username or hit["_source"]["_sfapi_internal"]["inf_public"]:
                         catalog_indices_list.append(catalog_index_list)
                         allowed_hits.append(hit)
                         if len(allowed_hits) == limit:
@@ -984,12 +974,12 @@ class DatabaseLogic:
             sub_catalogs = []
             for sub_catalog in sub_data_catalogs_and_collections[0]:
                 if sub_catalog["_source"]:
-                    if hit["_source"]["_sfapi_internal"]["inf_public"]:
+                    if hit["_source"]["_sfapi_internal"]["owner"] == username or hit["_source"]["_sfapi_internal"]["inf_public"]:
                         sub_catalogs.append(sub_catalog["_source"])
             # Extract collections
             for collection in sub_data_catalogs_and_collections[1]:
                 if collection["_source"]:
-                    if hit["_source"]["_sfapi_internal"]["inf_public"]:
+                    if hit["_source"]["_sfapi_internal"]["owner"] == username or hit["_source"]["_sfapi_internal"]["inf_public"]:
                         collections.append(collection["_source"])
             catalogs.append(
                 self.catalog_serializer.db_to_stac(
@@ -1043,14 +1033,7 @@ class DatabaseLogic:
             )
             hits = response["hits"]["hits"]
 
-            catalogs = [
-                self.catalog_serializer.db_to_stac(
-                    catalog_path=parent_catalog_path,
-                    catalog=hit["_source"],
-                    base_url=base_url,
-                )
-                for hit in hits
-            ]
+            catalogs = [hit["_source"] for hit in hits]
         except exceptions.NotFoundError:
             catalogs = []
 
@@ -1480,7 +1463,7 @@ class DatabaseLogic:
         sort: Optional[Dict[str, Dict[str, str]]],
         catalog_paths: Optional[List[str]],
         collection_ids: Optional[List[str]],
-        user_index: str,
+        username: str,
         ignore_unavailable: bool = True,
     ) -> Tuple[Iterable[Dict[str, Any]], Optional[int], Optional[str]]:
         """Execute a search query with limit and other optional parameters.
@@ -1571,7 +1554,7 @@ class DatabaseLogic:
                     catalog_path=item_catalog_path,
                     collection_id=hit["_source"]["collection"],
                 )
-                if collection["_sfapi_internal"]["inf_public"]:
+                if collection["_sfapi_internal"]["owner"] == username or collection["_sfapi_internal"]["inf_public"]:
                     items_and_cat_paths.append((hit["_source"], item_catalog_path))
                     if len(items_and_cat_paths) == limit:
                         token = None
@@ -1616,6 +1599,7 @@ class DatabaseLogic:
         base_url: str,
         token: Optional[str],
         sort: Optional[Dict[str, Dict[str, str]]],
+        username: str,
         catalog_path: str = None,
         ignore_unavailable: bool = True,
     ) -> Tuple[Iterable[Dict[str, Any]], Optional[int], Optional[str]]:
@@ -1628,6 +1612,7 @@ class DatabaseLogic:
             catalog_path (str) : The path to the catalog to search for collections.
             token (Optional[str]): The token used to return the next set of results.
             sort (Optional[Dict[str, Dict[str, str]]]): Specifies how the results should be sorted.
+            username (str): username of searching user
             collection_ids (Optional[List[str]]): The collection ids to search.
             ignore_unavailable (bool, optional): Whether to ignore unavailable collections. Defaults to True.
 
@@ -1688,7 +1673,7 @@ class DatabaseLogic:
 
             hits = es_response["hits"]["hits"]
             for i, hit in enumerate(hits):
-                if hit["_source"]["_sfapi_internal"]["inf_public"]:
+                if hit["_source"]["_sfapi_internal"]["owner"] == username or hit["_source"]["_sfapi_internal"]["inf_public"]:
                     catalog_path = hit["_index"].split("_", 1)[1]
                     catalog_path_list = catalog_path.split(CATALOG_SEPARATOR)
                     catalog_path_list.reverse()
@@ -3264,6 +3249,7 @@ class DatabaseLogic:
         base_url: str,
         token: Optional[str],
         sort: Optional[Dict[str, Dict[str, str]]],
+        username: str,
         ignore_unavailable: bool = True,
         conformance_classes: list = [],
     ) -> Tuple[Iterable[Dict[str, Any]], Optional[int], Optional[str]]:
@@ -3274,6 +3260,7 @@ class DatabaseLogic:
             limit (int): The maximum number of results to be returned.
             token (Optional[str]): The token used to return the next set of results.
             sort (Optional[Dict[str, Dict[str, str]]]): Specifies how the results should be sorted.
+            username (str): The username of the user making the request.
             collection_ids (Optional[List[str]]): The collection ids to search.
             ignore_unavailable (bool, optional): Whether to ignore unavailable collections. Defaults to True.
 
@@ -3328,7 +3315,7 @@ class DatabaseLogic:
             hits = es_response["hits"]["hits"]
 
             for hit in hits:
-                if hit["_source"]["_sfapi_internal"]["inf_public"]:
+                if hit["_source"]["_sfapi_internal"]["owner"] == username or hit["_source"]["_sfapi_internal"]["inf_public"]:
                     if hit["_source"]["type"] == "Catalog":
                         catalog_hits.append(hit)
                         # Calculate catalog path for found catalog
