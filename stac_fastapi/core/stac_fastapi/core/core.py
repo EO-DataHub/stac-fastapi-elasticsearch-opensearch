@@ -526,7 +526,7 @@ class CoreClient(AsyncBaseCoreClient):
             {
                 "rel": Relations.self.value,
                 "type": MimeTypes.json,
-                "href": f"{urljoin(base_url, catalog_url)}catalogs",
+                "href": f"{urljoin(base_url, catalog_url)}/catalogs",
             },
         ]
 
@@ -2619,7 +2619,7 @@ class EsAsyncCollectionSearchClient(AsyncCollectionSearchClient):
             {
                 "rel": Relations.self.value,
                 "type": MimeTypes.json,
-                "href": f"{urljoin(base_url, catalog_url)}collections",
+                "href": f"{urljoin(base_url, catalog_url)}/collections",
             },
         ]
 
