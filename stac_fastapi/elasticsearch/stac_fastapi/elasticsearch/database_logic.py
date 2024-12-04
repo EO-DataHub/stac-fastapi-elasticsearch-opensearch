@@ -2952,6 +2952,7 @@ class DatabaseLogic:
                 f"Catalog {catalog_id} at {'path ' + '/'.join(catalog_path_list[:-1]) if len(catalog_path_list) > 1 else 'top-level'} has no items, so index does not exist and cannot be deleted, continuing as normal."
             )
 
+
     async def bulk_async(
         self,
         catalog_path: str,
