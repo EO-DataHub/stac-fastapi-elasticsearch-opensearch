@@ -435,6 +435,7 @@ class CoreClient(AsyncBaseCoreClient):
                 token=token,
                 limit=limit,
                 base_url=base_url,
+                username=username,
                 conformance_classes=self.conformance_classes(),
             )
         )
