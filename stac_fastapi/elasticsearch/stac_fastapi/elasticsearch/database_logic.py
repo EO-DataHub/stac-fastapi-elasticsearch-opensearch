@@ -777,7 +777,8 @@ class DatabaseLogic:
     async def get_catalog_collections(
         self, catalog_path: str, token: Optional[str], limit: int, base_url: str, user_index: int
     ) -> Tuple[List[Dict[str, Any]], Optional[str]]:
-        """Retrieve a list of all collections in a catalog from Elasticsearch, supporting pagination.
+        """Retrieve a list of up to 10,000 collections in a catalog from Elasticsearch. 
+        To retrieve paginated results, use get_all_collections instead.
 
         Args:
             catalog_path (str): The path to catalog to search.
@@ -786,7 +787,7 @@ class DatabaseLogic:
             base_url (str): The base URL used to create the item's self URL.
 
         Returns:
-            A tuple of (collections, next pagination token if any).
+            A list of Collections.
         """
 
         # Create list of nested catalog ids
