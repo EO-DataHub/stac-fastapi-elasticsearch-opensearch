@@ -10,7 +10,7 @@ import attr
 from elasticsearch_dsl import Q, Search
 
 import stac_fastapi.types.search
-from elasticsearch import exceptions, helpers  # type: ignore
+from elasticsearch import exceptions, helpers, NotFoundError  # type: ignore
 from stac_fastapi.core.extensions import filter
 from stac_fastapi.core.serializers import (
     CatalogCollectionSerializer,
@@ -508,6 +508,28 @@ async def delete_item_index(collection_id: str, catalog_path_list: List[str]):
     name = index_by_collection_id(
         collection_id=collection_id, catalog_path_list=catalog_path_list
     )
+    resolved = await client.indices.resolve_index(name=name)
+    if "aliases" in resolved and resolved["aliases"]:
+        [alias] = resolved["aliases"]
+        await client.indices.delete_alias(index=alias["indices"], name=alias["name"])
+        await client.indices.delete(index=alias["indices"])
+    else:
+        await client.indices.delete(index=name)
+    await client.close()
+
+async def delete_item_index_by_catalog(catalog_path_list: List[str]):
+    """Delete the index for items in a collection, specifying the catalog and top-level catalog.
+
+    Args:
+        collection_id (str): The ID of the collection whose items index will be deleted.
+        catalog_path (List[str]): The path for the catalog whose items index will be deleted.
+        super_catalog_id (str): The ID of the top-level catalog whose items index will be deleted.
+    """
+    client = AsyncElasticsearchSettings().create_client
+
+    # Index by catalog path, then replace the catalog index with the items index
+    name = index_catalogs_by_catalog_id(catalog_path_list=catalog_path_list).replace(CATALOGS_INDEX_PREFIX, ITEMS_INDEX_PREFIX)
+    name = name.replace("items_", f"items_*{GROUP_SEPARATOR}", 1) # ensure we are looking in collections that sit within the specified catalog
     resolved = await client.indices.resolve_index(name=name)
     if "aliases" in resolved and resolved["aliases"]:
         [alias] = resolved["aliases"]
@@ -3120,12 +3142,9 @@ class DatabaseLogic:
             logger.warning(
                 f"Catalog {catalog_id} at {'path ' + '/'.join(catalog_path_list[:-1]) if len(catalog_path_list) > 1 else 'top-level'} has no subcatalogs, so index does not exist and cannot be deleted, continuing as normal."
             )
-
         # Remove index for collections in this index
         try:
-            await delete_collection_index_by_catalog(
-                catalog_path_list=catalog_path_list
-            )
+            await delete_collection_index_by_catalog(catalog_path_list=catalog_path_list)
         except NotFoundError:
             logger.warning(
                 f"Catalog {catalog_id} at {'path ' + '/'.join(catalog_path_list[:-1]) if len(catalog_path_list) > 1 else 'top-level'} has no collections, so index does not exist and cannot be deleted, continuing as normal."
@@ -3138,6 +3157,7 @@ class DatabaseLogic:
             logger.warning(
                 f"Catalog {catalog_id} at {'path ' + '/'.join(catalog_path_list[:-1]) if len(catalog_path_list) > 1 else 'top-level'} has no items, so index does not exist and cannot be deleted, continuing as normal."
             )
+
 
     async def bulk_async(
         self,

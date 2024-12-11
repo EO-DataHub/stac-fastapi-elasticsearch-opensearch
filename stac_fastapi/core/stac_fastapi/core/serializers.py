@@ -1,7 +1,6 @@
 """Serializers."""
 
 import abc
-import os
 from copy import deepcopy
 from typing import Any
 from urllib.parse import urljoin
@@ -272,7 +271,7 @@ class CatalogSerializer(Serializer):
         # Construct catalog url path prefix
         catalog_url = f"catalogs/{full_catalog_path}"
 
-        href = urljoin(base_url, f"{catalog_url}/search")
+        search_href = urljoin(base_url, f"{catalog_url}/search")
 
         # The following links should be rewritten for this catalog
         link_rels = []
@@ -290,7 +289,7 @@ class CatalogSerializer(Serializer):
                 elif link["method"] == "GET":
                     link_rels.append("search_get")
 
-                link["href"] = href
+                link["href"] = search_href
 
             elif link["rel"] == "parent":
                 link["href"] = urljoin(base_url, f"{parent_url}")
@@ -339,7 +338,7 @@ class CatalogSerializer(Serializer):
                 {
                     "rel": Relations.search.value,
                     "type": MimeTypes.json,
-                    "href": href,
+                    "href": search_href,
                     "method": "POST",
                 }
             )
@@ -348,7 +347,7 @@ class CatalogSerializer(Serializer):
                 {
                     "rel": Relations.search.value,
                     "type": MimeTypes.geojson,
-                    "href": href,
+                    "href": search_href,
                     "method": "GET",
                 }
             )
