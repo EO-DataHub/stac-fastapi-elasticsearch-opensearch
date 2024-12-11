@@ -104,7 +104,6 @@ class AsyncBaseTransactionsClient(abc.ABC):
         catalog_path: str,
         collection: stac_types.Collection,
         workspace: str,
-        is_public: bool = False,
         **kwargs,
     ) -> Optional[Union[stac_types.Collection, Response]]:
         """Create a new collection.
@@ -165,7 +164,6 @@ class AsyncBaseTransactionsClient(abc.ABC):
         catalog: stac_types.Catalog,
         workspace: str,
         catalog_path: Optional[str],
-        is_public: bool = False,
         **kwargs,
     ) -> Optional[stac_types.Catalog | Response]:
         """Create a new catalog.
@@ -196,6 +194,54 @@ class AsyncBaseTransactionsClient(abc.ABC):
 
         Returns:
             The updated collection.
+        """
+        ...
+
+    @abc.abstractmethod
+    async def update_catalog_access_control(
+        self,
+        workspace: str,
+        access_policy: stac_types.AccessPolicy,
+        catalog_path: Optional[str] = None,
+    ):
+        """Perform a complete update on the access control for the given catalog.
+
+        Called with `PUT /catalogs/{catalog_path}/access-policy`. This catalog must exist and this endpoint
+        only updates the access control details for this catalog, either public or private or with a list of allowed workspaces,
+        no other changes.
+
+        Args:
+            workspace: the workspace that is requesting to make the change
+            catalog_path: the path to the catalog to be updated
+            access_policy: dictionary defining access policy for the catalog
+
+        Returns:
+            N/A
+        """
+        ...
+
+    @abc.abstractmethod
+    async def update_collection_access_control(
+        self,
+        workspace: str,
+        collection_id: str,
+        access_policy: stac_types.AccessPolicy,
+        catalog_path: Optional[str] = None,
+    ):
+        """Perform a complete update on the access control for the given collection.
+
+        Called with `PUT /catalogs/{catalog_path}/collections/{collection_id}/access-policy`. This collection must exist and this endpoint
+        only updates the access control details for this collection, either public or private or with a list of allowed workspaces,
+        no other changes.
+
+        Args:
+            workspace: the workspace that is requesting to make the change
+            collection_id: the id of the collection to be updated
+            catalog_path: the path to the catalog to be updated
+            access_policy: dictionary defining access policy for the collection
+
+        Returns:
+            N/A
         """
         ...
 

@@ -30,7 +30,9 @@ logger = logging.getLogger(__name__)
 
 NumType = Union[float, int]
 
-NUMBER_OF_CATALOG_COLLECTIONS = os.getenv("NUMBER_OF_CATALOG_COLLECTIONS", 100)
+NUMBER_OF_CATALOG_COLLECTIONS = os.getenv(
+    "NUMBER_OF_CATALOG_COLLECTIONS", stac_fastapi.types.search.Limit.le
+)
 
 CATALOG_SEPARATOR = os.getenv(
     "CATALOG_SEPARATOR", "____"
@@ -76,7 +78,6 @@ DEFAULT_SORT = {
 }
 
 DEFAULT_COLLECTIONS_SORT = {
-    "extent.temporal.interval": {"order": "desc"},
     "id": {"order": "desc"},
 }
 
@@ -553,6 +554,7 @@ async def delete_collection_index_by_catalog(catalog_path_list: List[str]):
     # Need to include all subcatalogs as well
     name = name.replace("collections_", "collections*_", 1)
     resolved = await client.indices.resolve_index(name=name)
+    logger.info("Deleting collection index %s", name)
     try:
         if "aliases" in resolved and resolved["aliases"]:
             [alias] = resolved["aliases"]
@@ -580,6 +582,7 @@ async def delete_catalog_index(catalog_path_list: List[str]):
     name = index_catalogs_by_catalog_id(catalog_path_list=catalog_path_list)
     name = name.replace("catalogs_", "catalogs*_", 1)
     resolved = await client.indices.resolve_index(name=name)
+    logger.info("Deleting index %s", name)
     try:
         if "aliases" in resolved and resolved["aliases"]:
             [alias] = resolved["aliases"]
@@ -594,6 +597,33 @@ async def delete_catalog_index(catalog_path_list: List[str]):
         raise NotFoundError(
             f"Catalog path {'/'.join(catalog_path_list)} does not have any associated catalogs."
         )
+
+
+async def delete_item_index_by_catalog(catalog_path_list: List[str]):
+    """Delete the index for items in a collection, specifying the catalog and top-level catalog.
+    Args:
+        collection_id (str): The ID of the collection whose items index will be deleted.
+        catalog_path (List[str]): The path for the catalog whose items index will be deleted.
+        super_catalog_id (str): The ID of the top-level catalog whose items index will be deleted.
+    """
+    client = AsyncElasticsearchSettings().create_client
+
+    # Index by catalog path, then replace the catalog index with the items index
+    name = index_catalogs_by_catalog_id(catalog_path_list=catalog_path_list).replace(
+        CATALOGS_INDEX_PREFIX, ITEMS_INDEX_PREFIX
+    )
+    name = name.replace(
+        "items_", f"items_*{GROUP_SEPARATOR}", 1
+    )  # ensure we are looking in collections that sit within the specified catalog
+    resolved = await client.indices.resolve_index(name=name)
+    logger.info("Deleting item index %s", name)
+    if "aliases" in resolved and resolved["aliases"]:
+        [alias] = resolved["aliases"]
+        await client.indices.delete_alias(index=alias["indices"], name=alias["name"])
+        await client.indices.delete(index=alias["indices"])
+    else:
+        await client.indices.delete(index=name)
+    await client.close()
 
 
 def mk_item_id(item_id: str, collection_id: str, catalog_path_list: List[str]):
@@ -689,7 +719,7 @@ class DatabaseLogic:
     """CORE LOGIC"""
 
     async def get_all_collections(
-        self, token: Optional[str], limit: int, base_url: str
+        self, token: Optional[str], limit: int, base_url: str, username: str
     ) -> Tuple[List[Dict[str, Any]], Optional[str]]:
         """Retrieve a list of all collections from Elasticsearch, supporting pagination.
         This goes across all catalogs and top-level catalogs.
@@ -705,53 +735,72 @@ class DatabaseLogic:
 
         search_after = None
         if token:
-            search_after = [token]
+            search_after = urlsafe_b64decode(token.encode()).decode().split(",")
 
         # Logic to ensure next token only returned when further results are available
         max_result_window = stac_fastapi.types.search.Limit.le
         size_limit = min(limit + 1, max_result_window)
 
-        response = await self.client.search(
-            index=f"{COLLECTIONS_INDEX_PREFIX}*",
-            body={
-                "sort": [{"id": {"order": "asc"}}],
-                "size": size_limit,
-                "search_after": search_after,
-            },
-        )
-
         collections = []
-        hit_tokens = []
-        hits = response["hits"]["hits"]
-        for hit in hits:
-            catalog_path = hit["_index"].split("_", 1)[1]
-            catalog_path_list = catalog_path.split(CATALOG_SEPARATOR)
-            catalog_path_list.reverse()
-            catalog_path = "/".join(catalog_path_list)
-            collections.append(
-                self.collection_serializer.db_to_stac(
-                    collection=hit["_source"],
-                    base_url=base_url,
-                    catalog_path=catalog_path,
+
+        while len(collections) < limit:
+            try:
+                response = await self.client.search(
+                    index=f"{COLLECTIONS_INDEX_PREFIX}*",
+                    body={
+                        "sort": [{"id": {"order": "asc"}}],
+                        "size": size_limit,
+                        "search_after": search_after,
+                    },
                 )
-            )
-            if hit.get("sort"):
-                hit_token = hit["sort"][0]
-                hit_tokens.append(hit_token)
-            else:
-                hit_tokens.append(None)
+            except exceptions.NotFoundError:
+                response = None
+                collections = []
+                hits = []
+                break
+            
 
-        next_token = None
-        if len(hits) > limit and limit < max_result_window:
-            if hits and (hits[limit - 1].get("sort")):
-                next_token = hits[limit - 1]["sort"][0]
+            hits = response["hits"]["hits"]
+            for hit in hits:
+                catalog_path = hit["_index"].split("_", 1)[1]
+                catalog_path_list = catalog_path.split(CATALOG_SEPARATOR)
+                catalog_path_list.reverse()
+                catalog_path = "/".join(catalog_path_list)
+                if hit["_source"]["_sfapi_internal"]["owner"] == username or hit["_source"]["_sfapi_internal"]["inf_public"]:
+                    collections.append(
+                        self.collection_serializer.db_to_stac(
+                            collection=hit["_source"],
+                            base_url=base_url,
+                            catalog_path=catalog_path,
+                        )
+                    )
+                    if len(collections) == limit:
+                        token = None
+                        # Return token for current final asset, as we know the user has access to this one
+                        if sort_array := hit.get("sort"):
+                            token = urlsafe_b64encode(
+                                    ",".join([str(x) for x in sort_array]).encode()
+                                ).decode()
+                        break
+            if len(collections) == limit:
+                # break out of while loop
+                break
 
-        return collections, next_token, hit_tokens
+            search_after = None
+            if len(hits) > limit and limit < max_result_window:
+                if hits and (sort_array := hits[limit - 1].get("sort")):
+                    search_after = sort_array
+            if not search_after:
+                token = None
+                break
+
+        return collections, token
 
     async def get_catalog_collections(
-        self, catalog_path: str, token: Optional[str], limit: int, base_url: str
+        self, catalog_path: str, token: Optional[str], limit: int, base_url: str, user_index: int
     ) -> Tuple[List[Dict[str, Any]], Optional[str]]:
-        """Retrieve a list of all collections in a catalog from Elasticsearch, supporting pagination.
+        """Retrieve a list of up to 10,000 collections in a catalog from Elasticsearch. 
+        To retrieve paginated results, use get_all_collections instead.
 
         Args:
             catalog_path (str): The path to catalog to search.
@@ -760,75 +809,37 @@ class DatabaseLogic:
             base_url (str): The base URL used to create the item's self URL.
 
         Returns:
-            A tuple of (collections, next pagination token if any).
+            A list of Collections.
         """
 
         # Create list of nested catalog ids
         catalog_path_list = catalog_path.split("/")
-
-        search_after = None
-        if token:
-            search_after = [token]
-
-        # Logic to ensure next token only returned when further results are available
-        max_result_window = stac_fastapi.types.search.Limit.le
-        size_limit = min(limit + 1, max_result_window)
-
+        index_param = index_collections_by_catalog_id(
+            catalog_path_list=catalog_path_list
+        )
         await self.check_catalog_exists(catalog_path_list=catalog_path_list)
 
-        index_param = collection_indices(catalog_paths=[catalog_path_list])
-
+        # Get all catalogs in this index
+        query = {"query": {"match_all": {}}}
         try:
             response = await self.client.search(
-                index=index_param,
-                body={
-                    "sort": [{"id": {"order": "asc"}}],
-                    "size": size_limit,
-                    "search_after": search_after,
-                },
+                index=index_param, body=query, size=NUMBER_OF_CATALOG_COLLECTIONS
             )
-        except exceptions.NotFoundError:
-            # No collections underneath this catalog
-            response = None
-            collections = []
-            hits = []
-            hit_tokens = []
-
-        if response:
-            collections = []
-            hit_tokens = []
             hits = response["hits"]["hits"]
-            for hit in hits:
-                catalog_path = hit["_index"].split("_", 1)[1]
-                catalog_path_list = catalog_path.split(CATALOG_SEPARATOR)
-                catalog_path_list.reverse()
-                catalog_path = "/".join(catalog_path_list)
-                collections.append(
-                    self.collection_serializer.db_to_stac(
-                        collection=hit["_source"],
-                        base_url=base_url,
-                        catalog_path=catalog_path,
-                    )
-                )
-                if hit.get("sort"):
-                    hit_token = hit["sort"][0]
-                    hit_tokens.append(hit_token)
-                else:
-                    hit_tokens.append(None)
 
-        next_token = None
-        if len(hits) > limit and limit < max_result_window:
-            if hits and (hits[limit - 1].get("sort")):
-                next_token = hits[limit - 1]["sort"][0]
+            collections = [hit["_source"] for hit in hits]
 
-        return collections, next_token, hit_tokens
+        except exceptions.NotFoundError:
+            collections = []
+
+        return collections
 
     async def get_all_catalogs(
         self,
         token: Optional[str],
         limit: Optional[int],
         base_url: str,
-        user_index: int,
+        username: str,
         catalog_path: Optional[str] = None,
         conformance_classes: list = [],
     ) -> Tuple[List[Dict[str, Any]], Optional[str]]:
@@ -848,6 +859,7 @@ class DatabaseLogic:
         if catalog_path:
             # Create list of nested catalog ids
             catalog_path_list = catalog_path.split("/")
+            
         else:
             catalog_path_list = None
 
@@ -855,42 +867,78 @@ class DatabaseLogic:
 
         search_after = None
         if token:
-            search_after = [token]
+            search_after = urlsafe_b64decode(token.encode()).decode().split(",")
 
         # Logic to ensure next token only returned when further results are available
         max_result_window = stac_fastapi.types.search.Limit.le
         size_limit = min(limit + 1, max_result_window)
 
-        # Get all contained catalogs
-        try:
-            response = await self.client.search(
-                index=params_index,
-                body={
-                    "sort": [{"id": {"order": "asc"}}],
-                    "size": size_limit,
-                    "search_after": search_after,
-                },
-            )
-            hits = response["hits"]["hits"]
-        except exceptions.NotFoundError:
-            response = None
-            catalogs = []
-            hits = []
-
-        # Construct async tasks
         catalog_indices_list = []
-        for hit in hits:
-            # Construct required catalog indices
+        allowed_hits = []
+
+        # Get all contained catalogs
+        while len(catalog_indices_list) < limit:
             try:
-                catalog_id = hit["_id"]
-                catalog_index = hit["_index"].split("_", 1)[1]
-                catalog_index_list = catalog_index.split(CATALOG_SEPARATOR)
-                catalog_index_list.reverse()
-                catalog_index_list.append(catalog_id)
-                catalog_indices_list.append(catalog_index_list)
-            except IndexError:
-                catalog_index_list = [catalog_id]
-                catalog_indices_list.append(catalog_index_list)
+                response = await self.client.search(
+                    index=params_index,
+                    body={
+                        "sort": [{"id": {"order": "asc"}}],
+                        "size": size_limit,
+                        "search_after": search_after,
+                    },
+                )
+                hits = response["hits"]["hits"]
+            except exceptions.NotFoundError:
+                response = None
+                catalogs = []
+                hits = []
+                allowed_hits = []
+                break
+
+            # Construct async tasks
+            for hit in hits:
+                # Construct required catalog indices
+                try:
+                    catalog_id = hit["_id"]
+                    catalog_index = hit["_index"].split("_", 1)[1]
+                    catalog_index_list = catalog_index.split(CATALOG_SEPARATOR)
+                    catalog_index_list.reverse()
+                    catalog_index_list.append(catalog_id)
+                    if hit["_source"]["_sfapi_internal"]["owner"] == username or hit["_source"]["_sfapi_internal"]["inf_public"]:
+                        catalog_indices_list.append(catalog_index_list)
+                        allowed_hits.append(hit)
+                        if len(allowed_hits) == limit:
+                            token = None
+                            # Return token for current final asset, as we know the user has access to this one
+                            if sort_array := hit.get("sort"):
+                                token = urlsafe_b64encode(
+                                        ",".join([str(x) for x in sort_array]).encode()
+                                    ).decode()
+                            break
+                except IndexError:
+                    catalog_index_list = [catalog_id]
+                    if hit["_source"]["_sfapi_internal"]["owner"] == username or hit["_source"]["_sfapi_internal"]["inf_public"]:
+                        catalog_indices_list.append(catalog_index_list)
+                        allowed_hits.append(hit)
+                        if len(allowed_hits) == limit:
+                            token = None
+                            # Return token for current final asset, as we know the user has access to this one
+                            if sort_array := hit.get("sort"):
+                                token = urlsafe_b64encode(
+                                        ",".join([str(x) for x in sort_array]).encode()
+                                    ).decode()
+                            break
+            if len(allowed_hits) == limit:
+                # break out of while loop
+                break
+
+            search_after = None
+            if len(hits) > limit and limit < max_result_window:
+                if hits and (sort_array := hits[limit - 1].get("sort")):
+                    search_after = sort_array
+            if not search_after:
+                token = None
+                break
 
         sub_catalogs_results = await asyncio.gather(
             *[
@@ -898,9 +946,8 @@ class DatabaseLogic:
                     index=index_catalogs_by_catalog_id(
                         catalog_path_list=catalog_index_list
                     ),
-                    body={
-                        "sort": [{"id": {"order": "asc"}}],
-                    },
+                    body={"query": {"match_all": {}}},
+                    size=NUMBER_OF_CATALOG_COLLECTIONS
                 )
                 for catalog_index_list in catalog_indices_list
             ],
@@ -912,9 +959,8 @@ class DatabaseLogic:
                     index=index_collections_by_catalog_id(
                         catalog_path_list=catalog_index_list
                     ),
-                    body={
-                        "sort": [{"id": {"order": "asc"}}],
-                    },
+                    body={"query": {"match_all": {}}},
+                    size=NUMBER_OF_CATALOG_COLLECTIONS
                 )
                 for catalog_index_list in catalog_indices_list
             ],
@@ -941,8 +987,8 @@ class DatabaseLogic:
         child_data = list(zip(sub_catalogs_responses, collection_responses))
 
         catalogs = []
-        hit_tokens = []
-        for i, hit in enumerate(hits):
+        collections = []
+        for i, hit in enumerate(allowed_hits):
             catalog_path = hit["_index"].split("_", 1)[1]
             catalog_path_list = catalog_path.split(CATALOG_SEPARATOR)
             catalog_path_list.reverse()
@@ -950,19 +996,14 @@ class DatabaseLogic:
             sub_data_catalogs_and_collections = child_data[i]
             # Extract sub-catalogs
             sub_catalogs = []
-            for catalog in sub_data_catalogs_and_collections[0]:
-                if catalog["_source"]:
-                    if int(catalog["_source"]["access_control"][-1]) or int(
-                        catalog["_source"]["access_control"][user_index]
-                    ):
-                        sub_catalogs.append(catalog["_source"])
+            for sub_catalog in sub_data_catalogs_and_collections[0]:
+                if sub_catalog["_source"]:
+                    if hit["_source"]["_sfapi_internal"]["owner"] == username or hit["_source"]["_sfapi_internal"]["inf_public"]:
+                        sub_catalogs.append(sub_catalog["_source"])
             # Extract collections
-            collections = []
             for collection in sub_data_catalogs_and_collections[1]:
                 if collection["_source"]:
-                    if int(collection["_source"]["access_control"][-1]) or int(
-                        collection["_source"]["access_control"][user_index]
-                    ):
+                    if hit["_source"]["_sfapi_internal"]["owner"] == username or hit["_source"]["_sfapi_internal"]["inf_public"]:
                         collections.append(collection["_source"])
             catalogs.append(
                 self.catalog_serializer.db_to_stac(
@@ -974,31 +1015,17 @@ class DatabaseLogic:
                     conformance_classes=conformance_classes,
                 )
             )
-            if hit.get("sort"):
-                hit_token = hit["sort"][0]
-                hit_tokens.append(hit_token)
-            else:
-                hit_tokens.append(None)
 
-        next_token = None
-        if len(hits) > limit and limit < max_result_window:
-            if hits and (hits[limit - 1].get("sort")):
-                next_token = hits[limit - 1]["sort"][0]
-
-        return catalogs, next_token, hit_tokens
+        return catalogs, token
 
     async def get_catalog_subcatalogs(
         self,
-        token: Optional[str],
-        limit: int,
         base_url: str,
         catalog_path: Optional[str] = None,
     ) -> Tuple[List[Dict[str, Any]], Optional[str]]:
         """Retrieve a list of all catalogs in a catalog from Elasticsearch, supporting pagination.
 
         Args:
-            token (Optional[str]): The pagination token.
-            limit (int): The number of results to return.
             base_url (str): The base URL used to create the item's self URL.
             catalog_path (Optional[str]): The parent catalog in which to search (search all top-level catalogs if blank).
 
@@ -1022,45 +1049,19 @@ class DatabaseLogic:
             index_param = ROOT_CATALOGS_INDEX
             parent_catalog_path = None
 
-        search_after = None
-        if token:
-            search_after = [token]
-
-        # Logic to ensure next token only returned when further results are available
-        max_result_window = stac_fastapi.types.search.Limit.le
-        size_limit = min(limit + 1, max_result_window)
-
+        # Get all catalogs in this index
+        query = {"query": {"match_all": {}}}
         try:
             response = await self.client.search(
-                index=index_param,
-                body={
-                    # "sort": [{"id": {"order": "asc"}}],
-                    "size": size_limit,
-                    "search_after": search_after,
-                },
+                index=index_param, body=query, size=NUMBER_OF_CATALOG_COLLECTIONS
             )
-        except exceptions.NotFoundError:
-            response = None
-            catalogs = []
-            hits = []
-
-        if response:
             hits = response["hits"]["hits"]
-            catalogs = [
-                self.catalog_serializer.db_to_stac(
-                    catalog_path=parent_catalog_path,
-                    catalog=hit["_source"],
-                    base_url=base_url,
-                )
-                for hit in hits
-            ]
 
-        next_token = None
-        if len(hits) > limit and limit < max_result_window:
-            if hits and (hits[limit - 1].get("sort")):
-                next_token = hits[limit - 1]["sort"][0]
+            catalogs = [hit["_source"] for hit in hits]
+        except exceptions.NotFoundError:
+            catalogs = []
 
-        return catalogs, next_token
+        return catalogs
 
     async def get_one_item(
         self, catalog_path: str, collection_id: str, item_id: str
@@ -1486,6 +1487,7 @@ class DatabaseLogic:
         sort: Optional[Dict[str, Dict[str, str]]],
         catalog_paths: Optional[List[str]],
         collection_ids: Optional[List[str]],
+        username: str,
         ignore_unavailable: bool = True,
     ) -> Tuple[Iterable[Dict[str, Any]], Optional[int], Optional[str]]:
         """Execute a search query with limit and other optional parameters.
@@ -1535,72 +1537,84 @@ class DatabaseLogic:
         elif catalog_paths:
             index_param = indices(catalog_paths=catalog_paths_list)
 
-        search_task = asyncio.create_task(
-            self.client.search(
-                index=index_param,
-                ignore_unavailable=ignore_unavailable,
-                query=query,
-                sort=sort or DEFAULT_SORT,
-                search_after=search_after,
-                size=size_limit,
-            )
-        )
+        # count_task = asyncio.create_task(
+        #     self.client.count(
+        #         index=index_param,
+        #         ignore_unavailable=ignore_unavailable,
+        #         body=search.to_dict(count=True),
+        #     )
+        # )
 
-        count_task = asyncio.create_task(
-            self.client.count(
-                index=index_param,
-                ignore_unavailable=ignore_unavailable,
-                body=search.to_dict(count=True),
-            )
-        )
+        items_and_cat_paths = []
 
-        try:
-            es_response = await search_task
-        except exceptions.NotFoundError:
-            raise NotFoundError(
-                f"Either Collections '{','.join(collection_ids)}' or Catalog paths '{','.join(catalog_paths)}' do not exist"
+        while len(items_and_cat_paths) < limit:
+
+            search_task = asyncio.create_task(
+                self.client.search(
+                    index=index_param,
+                    ignore_unavailable=ignore_unavailable,
+                    query=query,
+                    sort=sort or DEFAULT_SORT,
+                    search_after=search_after,
+                    size=size_limit,
+                )
             )
 
-        hits = es_response["hits"]["hits"]
+            try:
+                es_response = await search_task
+            except exceptions.NotFoundError:
+                raise NotFoundError(
+                    f"Either Collections '{','.join(collection_ids)}' or Catalog paths '{','.join(catalog_paths)}' do not exist"
+                )
 
-        # Need to identify catalog for each item
-        items = []
-        hit_tokens = []
-        for hit in hits[:limit]:
-            item_catalog_path = hit["_index"].split(GROUP_SEPARATOR, 1)[1]
-            item_catalog_path_list = item_catalog_path.split(CATALOG_SEPARATOR)
-            item_catalog_path_list.reverse()
-            item_catalog_path = "/".join(item_catalog_path_list)
-            items.append((hit["_source"], item_catalog_path))
-            if sort_array := hit.get("sort"):
-                hit_token = urlsafe_b64encode(
-                    ",".join([str(x) for x in sort_array]).encode()
-                ).decode()
-                hit_tokens.append(hit_token)
-            else:
-                hit_tokens.append(None)
+            hits = es_response["hits"]["hits"]
 
-        next_token = None
-        if len(hits) > limit and limit < max_result_window:
-            if hits and (sort_array := hits[limit - 1].get("sort")):
-                next_token = urlsafe_b64encode(
-                    ",".join([str(x) for x in sort_array]).encode()
-                ).decode()
+            for hit in hits[:]:
+                item_catalog_path = hit["_index"].split(GROUP_SEPARATOR, 1)[1]
+                item_catalog_path_list = item_catalog_path.split(CATALOG_SEPARATOR)
+                item_catalog_path_list.reverse()
+                item_catalog_path = "/".join(item_catalog_path_list)
+                collection = await self.find_collection(
+                    catalog_path=item_catalog_path,
+                    collection_id=hit["_source"]["collection"],
+                )
+                if collection["_sfapi_internal"]["owner"] == username or collection["_sfapi_internal"]["inf_public"]:
+                    items_and_cat_paths.append((hit["_source"], item_catalog_path))
+                    if len(items_and_cat_paths) == limit:
+                        token = None
+                        # Return token for current final asset, as we know the user has access to this one
+                        if sort_array := hit.get("sort"):
+                            token = urlsafe_b64encode(
+                                    ",".join([str(x) for x in sort_array]).encode()
+                                ).decode()
+                        break
+            if len(items_and_cat_paths) == limit:
+                # break out of while loop
+                break
+
+            search_after = None
+            if len(hits) > limit and limit < max_result_window:
+                if hits and (sort_array := hits[limit - 1].get("sort")):
+                    search_after = sort_array
+            if not search_after:
+                token = None
+                break
 
         # (1) count should not block returning results, so don't wait for it to be done
         # (2) don't cancel the task so that it will populate the ES cache for subsequent counts
-        matched = (
-            es_response["hits"]["total"]["value"]
-            if es_response["hits"]["total"]["relation"] == "eq"
-            else None
-        )
-        if count_task.done():
-            try:
-                matched = count_task.result().get("count")
-            except Exception as e:
-                logger.error(f"Count task failed: {e}")
+        matched = None
+        # matched = (
+        #     es_response["hits"]["total"]["value"]
+        #     if es_response["hits"]["total"]["relation"] == "eq"
+        #     else None
+        # )
+        # if count_task.done():
+        #     try:
+        #         matched = count_task.result().get("count")
+        #     except Exception as e:
+        #         logger.error(f"Count task failed: {e}")
 
-        return items, matched, next_token, hit_tokens
+        return items_and_cat_paths, matched, token
 
     async def execute_collection_search(
         self,
@@ -1609,6 +1623,7 @@ class DatabaseLogic:
         base_url: str,
         token: Optional[str],
         sort: Optional[Dict[str, Dict[str, str]]],
+        username: str,
         catalog_path: str = None,
         ignore_unavailable: bool = True,
     ) -> Tuple[Iterable[Dict[str, Any]], Optional[int], Optional[str]]:
@@ -1621,6 +1636,7 @@ class DatabaseLogic:
             catalog_path (str) : The path to the catalog to search for collections.
             token (Optional[str]): The token used to return the next set of results.
             sort (Optional[Dict[str, Dict[str, str]]]): Specifies how the results should be sorted.
+            username (str): username of searching user
             collection_ids (Optional[List[str]]): The collection ids to search.
             ignore_unavailable (bool, optional): Whether to ignore unavailable collections. Defaults to True.
 
@@ -1653,71 +1669,81 @@ class DatabaseLogic:
         max_result_window = stac_fastapi.types.search.Limit.le
         size_limit = min(limit + 1, max_result_window)
 
-        search_task = asyncio.create_task(
-            self.client.search(
-                index=catalog_index,
-                ignore_unavailable=ignore_unavailable,
-                query=query,
-                sort=sort or DEFAULT_COLLECTIONS_SORT,
-                search_after=search_after,
-                size=size_limit,
-            )
-        )
-
-        count_task = asyncio.create_task(
-            self.client.count(
-                index=f"{COLLECTIONS_INDEX_PREFIX}*",
-                ignore_unavailable=ignore_unavailable,
-                body=search.to_dict(count=True),
-            )
-        )
-
-        es_response = await search_task
+        # count_task = asyncio.create_task(
+        #     self.client.count(
+        #         index=f"{COLLECTIONS_INDEX_PREFIX}*",
+        #         ignore_unavailable=ignore_unavailable,
+        #         body=search.to_dict(count=True),
+        #     )
+        # )
 
         collections = []
-        hit_tokens = []
-        hits = es_response["hits"]["hits"]
-        for hit in hits:
-            catalog_path = hit["_index"].split("_", 1)[1]
-            catalog_path_list = catalog_path.split(CATALOG_SEPARATOR)
-            catalog_path_list.reverse()
-            catalog_path = "/".join(catalog_path_list)
-            collections.append(
-                self.collection_serializer.db_to_stac(
-                    collection=hit["_source"],
-                    base_url=base_url,
-                    catalog_path=catalog_path,
+
+        # Loop condition only used to ensure no endless looping
+        while len(collections) < limit:
+
+            search_task = asyncio.create_task(
+                self.client.search(
+                    index=catalog_index,
+                    ignore_unavailable=ignore_unavailable,
+                    query=query,
+                    sort=sort or DEFAULT_COLLECTIONS_SORT,
+                    search_after=search_after,
+                    size=size_limit,
                 )
             )
-            if sort_array := hit.get("sort"):
-                hit_token = urlsafe_b64encode(
-                    ",".join([str(x) for x in sort_array]).encode()
-                ).decode()
-                hit_tokens.append(hit_token)
-            else:
-                hit_tokens.append(None)
 
-        next_token = None
-        if len(hits) > limit and limit < max_result_window:
-            if hits and (sort_array := hits[limit - 1].get("sort")):
-                next_token = urlsafe_b64encode(
-                    ",".join([str(x) for x in sort_array]).encode()
-                ).decode()
+            es_response = await search_task
+
+            hits = es_response["hits"]["hits"]
+            for i, hit in enumerate(hits):
+                if hit["_source"]["_sfapi_internal"]["owner"] == username or hit["_source"]["_sfapi_internal"]["inf_public"]:
+                    catalog_path = hit["_index"].split("_", 1)[1]
+                    catalog_path_list = catalog_path.split(CATALOG_SEPARATOR)
+                    catalog_path_list.reverse()
+                    catalog_path = "/".join(catalog_path_list)
+                    collections.append(
+                        self.collection_serializer.db_to_stac(
+                            collection=hit["_source"],
+                            base_url=base_url,
+                            catalog_path=catalog_path,
+                        )
+                    )
+                    if len(collections) == limit:
+                        token = None
+                        # Return token for current final asset, as we know the user has access to this one
+                        if sort_array := hit.get("sort"):
+                            token = urlsafe_b64encode(
+                                    ",".join([str(x) for x in sort_array]).encode()
+                                ).decode()
+                        break
+            if len(collections) == limit:
+                # break out of while loop
+                break
+
+            search_after = None
+            if len(hits) > limit and limit < max_result_window:
+                if hits and (sort_array := hits[limit - 1].get("sort")):
+                    search_after = sort_array
+            if not search_after:
+                token = None
+                break
 
         # (1) count should not block returning results, so don't wait for it to be done
         # (2) don't cancel the task so that it will populate the ES cache for subsequent counts
-        matched = (
-            es_response["hits"]["total"]["value"]
-            if es_response["hits"]["total"]["relation"] == "eq"
-            else None
-        )
-        if count_task.done():
-            try:
-                matched = count_task.result().get("count")
-            except Exception as e:
-                logger.error(f"Count task failed: {e}")
+        matched = None
+        # matched = (
+        #     es_response["hits"]["total"]["value"]
+        #     if es_response["hits"]["total"]["relation"] == "eq"
+        #     else None
+        # )
+        # if count_task.done():
+        #     try:
+        #         matched = count_task.result().get("count")
+        #     except Exception as e:
+        #         logger.error(f"Count task failed: {e}")
 
-        return collections, matched, next_token, hit_tokens
+        return collections, matched, token
 
     """ TRANSACTION LOGIC """
 
@@ -2021,30 +2047,29 @@ class DatabaseLogic:
 
         return self.collection_serializer.stac_to_db(collection, base_url)
 
+    def _combine_bitstrings(self, old_bitstring, new_bitstring):
+        old_bitstring_int = int(old_bitstring, 2)  # Convert binary string to integer
+        new_bitstring_int = int(new_bitstring, 2)  # Convert binary string to integer
+        new_bitstring_int = old_bitstring_int | new_bitstring_int
+
+        # Define the fixed length for the bitstrings
+        fixed_length = max(len(old_bitstring), len(new_bitstring))
+
+        new_bitstring = bin(new_bitstring_int)[2:].zfill(fixed_length)
+
+        return new_bitstring
+
     async def update_parent_access_control(
         self,
         catalog_path_list: List[str],
-        new_bitstring: str,
-        collection_id: Optional[str] = None,
+        is_public: bool,
     ):
-        """Update the access control bitstring for the parent catalog."""
+        """Update the access control for the parent catalog(s)."""
         # Check if updating for collection or catalog
-        # Currently nesting collections is not supported
+        # Nesting collections is not supported
 
-        if collection_id:
-            # Get current bitstring
-            collection = await self.client.get(
-                index=index_collections_by_catalog_id(
-                    catalog_path_list=catalog_path_list
-                ),
-                id=collection_id,
-            )
-            return
-            # TODO: Get all other child collections for this collection and compute OR bitwise operation
-            # e.g. using self.get_collection_collections
-
-        elif len(catalog_path_list) > 1:
-            # Update the access control bitstring for the parent catalog
+        if len(catalog_path_list) > 1:
+            # Update the access control bitstring for the parent catalog(s)
             parent_catalog_path_list = catalog_path_list[:-1]
             catalog_id = catalog_path_list[-1]
             catalog = await self.client.get(
@@ -2053,32 +2078,26 @@ class DatabaseLogic:
                 ),
                 id=catalog_id,
             )
-            old_bitstring = catalog["_source"]["access_control"]
-            old_bitstring_int = int(
-                old_bitstring, 2
-            )  # Convert binary string to integer
-            new_bitstring_int = int(
-                new_bitstring, 2
-            )  # Convert binary string to integer
-            new_bitstring_int = old_bitstring_int | new_bitstring_int
-
-            # Define the fixed length for the bitstrings
-            fixed_length = max(len(old_bitstring), len(new_bitstring))
-
-            new_bitstring = bin(new_bitstring_int)[2:].zfill(fixed_length)
-
-            annotation = {"access_control": new_bitstring}
+            # Note this will never un-publish a parent catalog, that will need to be done manually
+            current_annotations = catalog["_source"]["_sfapi_internal"]
+            old_public = catalog["_source"]["_sfapi_internal"]["inf_public"]
+            new_public = old_public or is_public
+            current_annotations["inf_public"] = new_public
+            annotations = {
+                "_sfapi_internal": current_annotations
+            }
             _ = await self.client.update(
                 index=index_catalogs_by_catalog_id(
                     catalog_path_list=parent_catalog_path_list
                 ),
                 id=catalog_id,
-                body={"doc": annotation},
+                body={"doc": annotations},
                 refresh=True,
             )
 
             await self.update_parent_access_control(
-                catalog_path_list=catalog_path_list[:-1], new_bitstring=new_bitstring
+                catalog_path_list=catalog_path_list[:-1],
+                is_public=new_public,
             )
 
         elif len(catalog_path_list) == 1:
@@ -2088,26 +2107,18 @@ class DatabaseLogic:
                 index=ROOT_CATALOGS_INDEX,
                 id=catalog_id,
             )
+            current_annotations = catalog["_source"]["_sfapi_internal"]
+            old_public = catalog["_source"]["_sfapi_internal"]["inf_public"]
+            new_public = old_public or is_public
+            current_annotations["inf_public"] = new_public
+            annotations = {
+                "_sfapi_internal": current_annotations
+            }
 
-            old_bitstring = catalog["_source"]["access_control"]
-            old_bitstring_int = int(
-                old_bitstring, 2
-            )  # Convert binary string to integer
-            new_bitstring_int = int(
-                new_bitstring, 2
-            )  # Convert binary string to integer
-            new_bitstring_int = old_bitstring_int | new_bitstring_int
-
-            # Define the fixed length for the bitstrings
-            fixed_length = max(len(old_bitstring), len(new_bitstring))
-
-            new_bitstring = bin(new_bitstring_int)[2:].zfill(fixed_length)
-
-            annotation = {"access_control": new_bitstring}
             _ = await self.client.update(
                 index=ROOT_CATALOGS_INDEX,
                 id=catalog_id,
-                body={"doc": annotation},
+                body={"doc": annotations},
                 refresh=True,
             )
 
@@ -2115,7 +2126,9 @@ class DatabaseLogic:
         self,
         catalog_path: str,
         collection: Collection,
-        access_control: str,
+        owner: str = None,
+        is_public: bool = None,
+        annotations: dict = {},
         refresh: bool = False,
     ):
         """Database logic for creating one item.
@@ -2123,7 +2136,9 @@ class DatabaseLogic:
         Args:
             catalog_path (str): The parent catalog into which the Collection will be inserted.
             collection (Collection): The collection to be created.
-            access_control (int): Integer bitstring defining user access.
+            owner (str): Owner for the collection
+            is_public (bool): Whether this collection is public
+            annotations (dict): The annotations for the previous instance of this collection to be maintained
             refresh (bool, optional): Refresh the index after performing the operation. Defaults to False.
 
         Raises:
@@ -2147,11 +2162,17 @@ class DatabaseLogic:
         )
 
         # Record access control bitstring for this document
-        annotation = {"access_control": access_control}
+        if not annotations:
+            annotations = {
+                "_sfapi_internal": {
+                    "owner": owner,
+                    "inf_public": is_public
+                }
+            }
         await self.client.update(
             index=index_collections_by_catalog_id(catalog_path_list=catalog_path_list),
             id=collection_id,
-            body={"doc": annotation},
+            body={"doc": annotations},
             refresh=refresh,
         )
 
@@ -2160,9 +2181,10 @@ class DatabaseLogic:
             id=collection_id,
         )
 
-        # Update the access control bitstring for the parent catalog
+        # Update the access control bitstring for the parent catalog(s)
         await self.update_parent_access_control(
-            catalog_path_list=catalog_path_list, new_bitstring=access_control
+            catalog_path_list=catalog_path_list,
+            is_public=is_public,
         )
 
         collection = await self.client.get(
@@ -2173,6 +2195,44 @@ class DatabaseLogic:
         if (meta := es_resp.get("meta")) and meta.get("status") == 409:
             raise ConflictError(
                 f"Collection {collection_id} in Catalog {catalog_id} at {'path ' + '/'.join(catalog_path_list[:-1]) if len(catalog_path_list) > 1 else 'top-level'} already exists"
+            )
+
+    async def update_collection_access_control(
+        self,
+        collection_id: str,
+        catalog_path: str,
+        owner: str,
+        is_public: bool,
+        refresh: bool = False,
+    ):
+        # Record access control bitstring for this document
+        if catalog_path:
+            # Create list of nested catalog ids
+            catalog_path_list = catalog_path.split("/")
+            index = index_collections_by_catalog_id(catalog_path_list=catalog_path_list)
+        else:
+            raise NotFoundError("Catalog path not provided")
+
+        annotations = {
+            "_sfapi_internal": {
+                "owner": owner,
+                "inf_public": is_public,
+                "rec_public": is_public
+            }
+        }
+
+        await self.client.update(
+            index=index,
+            id=collection_id,
+            refresh=refresh,
+            body={"doc": annotations},
+        )
+
+        # Update the access control bitstring for the parent catalog(s)
+        if catalog_path:
+            await self.update_parent_access_control(
+                catalog_path_list=catalog_path_list,
+                is_public=is_public,
             )
 
     async def find_collection(
@@ -2221,6 +2281,7 @@ class DatabaseLogic:
         catalog_path: str,
         collection_id: str,
         collection: Collection,
+        annotations: dict,
         refresh: bool = False,
     ):
         """Update a collection from the database.
@@ -2230,6 +2291,7 @@ class DatabaseLogic:
             catalog_path (str): The path of the catalog containing the collection to be updated, including parent catalogs, e.g. parentCat/cat
             collection_id (str): The ID of the collection to be updated.
             collection (Collection): The Collection object to be used for the update.
+            annotations (dict): The annotations for the collection to be maintained.
 
         Raises:
             NotFoundError: If the collection with the given `collection_id` is not
@@ -2244,19 +2306,12 @@ class DatabaseLogic:
         # Create list of nested catalog ids
         catalog_path_list = catalog_path.split("/")
 
-        current_collection = await self.find_collection(
-            catalog_path=catalog_path, collection_id=collection_id
-        )
-
-        # Access current access control bitstring, as this will remain identical
-        access_control = current_collection["access_control"]
-
         if collection_id != collection["id"]:
             await self.create_collection(
                 catalog_path=catalog_path,
                 collection=collection,
                 refresh=refresh,
-                access_control=access_control,
+                annotations=annotations,
             )
             dest_index = index_by_collection_id(
                 collection_id=collection["id"], catalog_path_list=catalog_path_list
@@ -2297,14 +2352,12 @@ class DatabaseLogic:
                 refresh=refresh,
             )
 
-            # Record access control bitstring for this document
-            annotation = {"access_control": access_control}
             await self.client.update(
                 index=index_collections_by_catalog_id(
                     catalog_path_list=catalog_path_list
                 ),
                 id=collection_id,
-                body={"doc": annotation},
+                body={"doc": annotations},
                 refresh=refresh,
             )
 
@@ -2451,16 +2504,20 @@ class DatabaseLogic:
     async def create_catalog(
         self,
         catalog: Catalog,
-        access_control: str,
+        owner: str = None,
+        is_public: bool = None,
         catalog_path: Optional[str] = None,
+        annotations: dict = {},
         refresh: bool = False,
     ):
         """Create a single catalog in the database.
 
         Args:
             catalog (Catalog): The Catalog object to be created.
-            access_control (str): String bitstring defining user access.
+            owner (str): Owner for this collection
+            is_public (bool): Whether this collection is public
             catalog_path (Optional[str]): The path to the parent catalog into which the new catalog will be inserted. Default is None.
+            annotations (dict): used when updating a catalog, to ensure annotations are maintained
             refresh (bool, optional): Whether to refresh the index after the creation. Default is False.
 
         Raises:
@@ -2492,12 +2549,19 @@ class DatabaseLogic:
         )
 
         # Record access control bitstring for this document
-        annotation = {"access_control": access_control}
+        if not annotations:
+            annotations = {
+                "_sfapi_internal": {
+                    "owner": owner,
+                    "inf_public": is_public
+                }
+            }
+
         await self.client.update(
             index=index,
             id=catalog_id,
             refresh=refresh,
-            body={"doc": annotation},
+            body={"doc": annotations},
         )
 
         catalog = await self.client.get(
@@ -2508,13 +2572,134 @@ class DatabaseLogic:
         # Update the access control bitstring for the parent catalog
         if catalog_path:
             await self.update_parent_access_control(
-                catalog_path_list=catalog_path_list, new_bitstring=access_control
+                catalog_path_list=catalog_path_list,
+                is_public=is_public,
             )
 
-        catalog = await self.client.get(
+    async def update_child_access_control(
+        self,
+        catalog_path: str,
+        owner: str,
+        is_public: bool,
+        refresh: bool = False,
+    ):
+        """
+        Update all child catalogs and collections to have the same access control as the parent catalog.
+        This sets the recursive access control for all child catalogs and collections. This is then overwritten for any
+        child catalog or collection that has its own access control.
+        """
+        # Get all subcatalogs for given path
+        catalog_path_list = catalog_path.split("/")
+        if len(catalog_path_list) > 1:
+            # Generate parent catalog path as list
+            cat_index = index_catalogs_by_catalog_id(
+                catalog_path_list=catalog_path_list
+            )
+            col_index = index_collections_by_catalog_id(
+                catalog_path_list=catalog_path_list
+            )
+        else:
+            # Set to root catalogs index
+            cat_index = ROOT_CATALOGS_INDEX
+            col_index = None  # no collections at top-level
+
+        annotations = {
+            "_sfapi_internal": {
+                "owner": owner,
+                "inf_public": is_public,
+                "rec_public": is_public
+            }
+        }
+
+
+        # Get all documents in the chosen index
+        query = {
+            "_source": False,  # Do not retrieve the _source field
+            "query": {"match_all": {}},
+        }
+
+
+        try:
+            response = await self.client.search(
+                index=cat_index, body=query, size=NUMBER_OF_CATALOG_COLLECTIONS
+            )
+            sub_catalogs_ids = [doc["_id"] for doc in response["hits"]["hits"]]
+        except exceptions.NotFoundError:
+            sub_catalogs_ids = []
+
+        for catalog_id in sub_catalogs_ids:
+            await self.client.update(
+                index=cat_index,
+                id=catalog_id,
+                refresh=refresh,
+                body={"doc": annotations},
+            )
+            new_catalog_path = f"{catalog_path}/{catalog_id}"
+            await self.update_child_access_control(
+                new_catalog_path, owner, is_public, refresh
+            )
+
+        if col_index:
+            # Update access control for nested collections
+            try:
+                response = await self.client.search(
+                    index=col_index, body=query, size=NUMBER_OF_CATALOG_COLLECTIONS
+                )
+                collection_ids = [doc["_id"] for doc in response["hits"]["hits"]]
+            except exceptions.NotFoundError:
+                collection_ids = []
+
+            for collection_id in collection_ids:
+                await self.client.update(
+                    index=col_index,
+                    id=collection_id,
+                    refresh=refresh,
+                    body={"doc": annotations},
+                )
+
+    async def update_catalog_access_control(
+        self,
+        catalog_path: str,
+        owner: str,
+        is_public: bool,
+        refresh: bool = False,
+    ):
+        # Record access control bitstring for this document
+        catalog_path_list = catalog_path.split("/")
+        catalog_id = catalog_path_list[-1]
+        if len(catalog_path_list) > 1:
+            # Generate parent catalog path as list
+            parent_catalog_path_list = catalog_path_list[:-1]
+            index = index_catalogs_by_catalog_id(
+                catalog_path_list=parent_catalog_path_list
+            )
+        else:
+            # Set to root catalogs index
+            index = ROOT_CATALOGS_INDEX
+
+        annotations = {
+            "_sfapi_internal": {
+                "owner": owner,
+                "inf_public": is_public,
+                "rec_public": is_public
+            }
+        }
+
+        await self.client.update(
             index=index,
             id=catalog_id,
+            refresh=refresh,
+            body={"doc": annotations},
         )
+
+        # Update the access control bitstring for the parent catalog(s)
+        if catalog_path:
+            await self.update_parent_access_control(
+                catalog_path_list=catalog_path_list,
+                is_public=is_public,
+            )
+        # Update recursive access for nested catalogs
+        await self.update_child_access_control(catalog_path, owner, is_public, refresh)
 
     async def find_catalog(self, catalog_path: str) -> Catalog:
         """Find and return a catalog from the database.
@@ -2696,7 +2881,7 @@ class DatabaseLogic:
             )
 
     async def update_catalog(
-        self, catalog_path: str, catalog: Catalog, refresh: bool = False
+        self, catalog_path: str, catalog: Catalog, annotations: dict, refresh: bool = False
     ):
         """Update a collection from the database.
 
@@ -2704,6 +2889,7 @@ class DatabaseLogic:
             self: The instance of the object calling this function.
             catalog_path (str): The path and ID of the catalog to be updated.
             catalog (Catalog): The Catalog object to be used for the update.
+            annotations (dict): The previous annotations for this catalog
             refresh (bool): Whether to refresh the index after the deletion (default: False).
 
         Raises:
@@ -2721,17 +2907,20 @@ class DatabaseLogic:
 
         catalog_id = catalog_path_list[-1]
 
-        await self.find_catalog(catalog_path=catalog_path)
-
         if catalog_id != catalog["id"]:
             old_catalog_path_list = catalog_path_list.copy()
-            # Remove old catalog_id and replace with new one
-            new_catalog_path_list = catalog_path_list[:-1]
-            new_catalog_parent_path = "/".join(new_catalog_path_list)
-            new_catalog_path_list.append(catalog["id"])
+
+            if len(catalog_path_list) < 2:
+                new_catalog_parent_path = None
+                new_catalog_path_list = [catalog_id]
+            else:
+                # Remove old catalog_id and replace with new one
+                new_catalog_path_list = catalog_path_list[:-1]
+                new_catalog_parent_path = "/".join(new_catalog_path_list)
+                new_catalog_path_list.append(catalog["id"])
 
             await self.create_catalog(
-                catalog_path=new_catalog_parent_path, catalog=catalog, refresh=refresh
+                catalog_path=new_catalog_parent_path, catalog=catalog, annotations=annotations, refresh=refresh
             )
 
             # Recursively update all catalogs within this catalog
@@ -2739,11 +2928,12 @@ class DatabaseLogic:
             params_index = index_catalogs_by_catalog_id(
                 catalog_path_list=catalog_path_list
             )
+            query = {
+                "_source": False,  # Do not retrieve the _source field
+                "query": {"match_all": {}},
+            }
             response = await self.client.search(
-                index=params_index,
-                body={
-                    "sort": [{"id": {"order": "asc"}}],
-                },
+                index=params_index, body=query, size=NUMBER_OF_CATALOG_COLLECTIONS
             )
             hits = response["hits"]["hits"]
 
@@ -2847,9 +3037,12 @@ class DatabaseLogic:
             try:
                 # Get all collections contained in this catalog
                 index_param = collection_indices(catalog_paths=[old_catalog_path_list])
+                query = {
+                    "_source": False,  # Do not retrieve the _source field
+                    "query": {"match_all": {}},
+                }
                 response = await self.client.search(
-                    index=index_param,
-                    body={"sort": [{"id": {"order": "asc"}}]},
+                    index=index_param, body=query, size=NUMBER_OF_CATALOG_COLLECTIONS
                 )
                 collection_ids = [hit["_id"] for hit in response["hits"]["hits"]]
 
@@ -2885,14 +3078,24 @@ class DatabaseLogic:
             await self.delete_catalog(catalog_path=catalog_path)
 
         else:
-            index_param = index_catalogs_by_catalog_id(
-                catalog_path_list=catalog_path_list[:-1]
-            )
+            if len(catalog_path_list) < 2:
+                index_param = ROOT_CATALOGS_INDEX
+            else:
+                index_param = index_catalogs_by_catalog_id(
+                    catalog_path_list=catalog_path_list[:-1]
+                )
             await self.client.index(
                 index=index_param,
                 id=catalog_id,
                 document=catalog,
                 refresh=refresh,
+            )
+
+            await self.client.update(
+                index=index_param,
+                id=catalog_id,
+                refresh=refresh,
+                body={"doc": annotations},
             )
 
     async def delete_catalog(self, catalog_path: str, refresh: bool = False):
@@ -2928,6 +3131,8 @@ class DatabaseLogic:
         else:
             index = ROOT_CATALOGS_INDEX
 
+        logger.info("Deleting catalog %s in index %s", catalog_id, index)
+
         await self.client.delete(index=index, id=catalog_id, refresh=refresh)
 
         # Remove index for catalogs in this index
@@ -2944,6 +3149,7 @@ class DatabaseLogic:
             logger.warning(
                 f"Catalog {catalog_id} at {'path ' + '/'.join(catalog_path_list[:-1]) if len(catalog_path_list) > 1 else 'top-level'} has no collections, so index does not exist and cannot be deleted, continuing as normal."
             )
+
         # Remove index for items in this index
         try:
             await delete_item_index_by_catalog(catalog_path_list=catalog_path_list)
@@ -3052,6 +3258,7 @@ class DatabaseLogic:
         base_url: str,
         token: Optional[str],
         sort: Optional[Dict[str, Dict[str, str]]],
+        username: str,
         ignore_unavailable: bool = True,
         conformance_classes: list = [],
     ) -> Tuple[Iterable[Dict[str, Any]], Optional[int], Optional[str]]:
@@ -3062,6 +3269,7 @@ class DatabaseLogic:
             limit (int): The maximum number of results to be returned.
             token (Optional[str]): The token used to return the next set of results.
             sort (Optional[Dict[str, Dict[str, str]]]): Specifies how the results should be sorted.
+            username (str): The username of the user making the request.
             collection_ids (Optional[List[str]]): The collection ids to search.
             ignore_unavailable (bool, optional): Whether to ignore unavailable collections. Defaults to True.
 
@@ -3086,46 +3294,68 @@ class DatabaseLogic:
         max_result_window = stac_fastapi.types.search.Limit.le
         size_limit = min(limit + 1, max_result_window)
 
-        search_task = asyncio.create_task(
-            self.client.search(
-                index=[f"{CATALOGS_INDEX_PREFIX}*", f"{COLLECTIONS_INDEX_PREFIX}*"],
-                ignore_unavailable=ignore_unavailable,
-                query=query,
-                sort=DEFAULT_DISCOVERY_SORT,  # set to default for time being to support token pagination
-                search_after=search_after,
-                size=size_limit,
-            )
-        )
-
-        count_task = asyncio.create_task(
-            self.client.count(
-                index=[f"{CATALOGS_INDEX_PREFIX}*", f"{COLLECTIONS_INDEX_PREFIX}*"],
-                ignore_unavailable=ignore_unavailable,
-                body=search.to_dict(count=True),
-            )
-        )
-
-        es_response = await search_task
-
-        hits = es_response["hits"]["hits"]
+        # count_task = asyncio.create_task(
+        #     self.client.count(
+        #         index=[f"{CATALOGS_INDEX_PREFIX}*", f"{COLLECTIONS_INDEX_PREFIX}*"],
+        #         ignore_unavailable=ignore_unavailable,
+        #         body=search.to_dict(count=True),
+        #     )
+        # )
 
         data = []
         catalog_hits = []
         collection_hits = []
         catalog_index_lists_for_catalogs = []
-        for hit in hits:
-            if hit["_source"]["type"] == "Catalog":
-                catalog_hits.append(hit)
-                # Calculate catalog path for found catalog
-                catalog_index = hit["_index"].split("_", 1)[1]
-                catalog_id = hit["_id"]
-                catalog_index_list = catalog_index.split(CATALOG_SEPARATOR)
-                catalog_index_list.reverse()
-                catalog_index_list.append(catalog_id)
-                catalog_index_lists_for_catalogs.append(catalog_index_list)
-                catalog_index = "/".join(catalog_index_list)
-            else:
-                collection_hits.append(hit)
+
+        while len(catalog_hits) + len(collection_hits) < limit:
+            search_task = asyncio.create_task(
+                self.client.search(
+                    index=[f"{CATALOGS_INDEX_PREFIX}*", f"{COLLECTIONS_INDEX_PREFIX}*"],
+                    ignore_unavailable=ignore_unavailable,
+                    query=query,
+                    sort=DEFAULT_DISCOVERY_SORT,  # set to default for time being to support token pagination
+                    search_after=search_after,
+                    size=size_limit,
+                )
+            )
+
+            es_response = await search_task
+
+            hits = es_response["hits"]["hits"]
+
+            for hit in hits:
+                if hit["_source"]["_sfapi_internal"]["owner"] == username or hit["_source"]["_sfapi_internal"]["inf_public"]:
+                    if hit["_source"]["type"] == "Catalog":
+                        catalog_hits.append(hit)
+                        # Calculate catalog path for found catalog
+                        catalog_index = hit["_index"].split("_", 1)[1]
+                        catalog_id = hit["_id"]
+                        catalog_index_list = catalog_index.split(CATALOG_SEPARATOR)
+                        catalog_index_list.reverse()
+                        catalog_index_list.append(catalog_id)
+                        catalog_index_lists_for_catalogs.append(catalog_index_list)
+                        catalog_index = "/".join(catalog_index_list)
+                    else:
+                        collection_hits.append(hit)
+                    if len(catalog_hits) + len(collection_hits) == limit:
+                        token = None
+                        # Return token for current final asset, as we know the user has access to this one
+                        if sort_array := hit.get("sort"):
+                            token = urlsafe_b64encode(
+                                    ",".join([str(x) for x in sort_array]).encode()
+                                ).decode()
+                        break
+            if len(catalog_hits) + len(collection_hits) == limit:
+                # break out of while loop
+                break
+            
+            search_after = None
+            if len(hits) > limit and limit < max_result_window:
+                if hits and (sort_array := hits[limit - 1].get("sort")):
+                    search_after = sort_array
+            if not search_after:
+                token = None
+                break
 
         catalogs_results = await asyncio.gather(
             *[
@@ -3215,13 +3445,6 @@ class DatabaseLogic:
                     conformance_classes=conformance_classes,
                 )
             )
-            if sort_array := hit.get("sort"):
-                hit_token = urlsafe_b64encode(
-                    ",".join([str(x) for x in sort_array]).encode()
-                ).decode()
-                hit_tokens.append(hit_token)
-            else:
-                hit_tokens.append(None)
         for i, hit in enumerate(collection_hits):
             if hit["_source"]["type"] == "Collection":
                 catalog_index = hit["_index"].split("_", 1)[1]
@@ -3242,32 +3465,19 @@ class DatabaseLogic:
                         conformance_classes=conformance_classes,
                     )
                 )
-                if sort_array := hit.get("sort"):
-                    hit_token = urlsafe_b64encode(
-                        ",".join([str(x) for x in sort_array]).encode()
-                    ).decode()
-                    hit_tokens.append(hit_token)
-                else:
-                    hit_tokens.append(None)
-
-        next_token = None
-        if len(hits) > limit and limit < max_result_window:
-            if hits and (sort_array := hits[limit - 1].get("sort")):
-                next_token = urlsafe_b64encode(
-                    ",".join([str(x) for x in sort_array]).encode()
-                ).decode()
 
         # (1) count should not block returning results, so don't wait for it to be done
         # (2) don't cancel the task so that it will populate the ES cache for subsequent counts
-        matched = (
-            es_response["hits"]["total"]["value"]
-            if es_response["hits"]["total"]["relation"] == "eq"
-            else None
-        )
-        if count_task.done():
-            try:
-                maybe_count = count_task.result().get("count")
-            except Exception as e:
-                logger.error(f"Count task failed: {e}")
+        matched = None
+        # matched = (
+        #     es_response["hits"]["total"]["value"]
+        #     if es_response["hits"]["total"]["relation"] == "eq"
+        #     else None
+        # )
+        # if count_task.done():
+        #     try:
+        #         maybe_count = count_task.result().get("count")
+        #     except Exception as e:
+        #         logger.error(f"Count task failed: {e}")
 
-        return data, matched, next_token, hit_tokens
+        return data, matched, token

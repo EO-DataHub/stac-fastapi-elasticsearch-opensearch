@@ -124,6 +124,19 @@ class CoreClient(AsyncBaseCoreClient):
     title: str = attr.ib(default="stac-fastapi")
     description: str = attr.ib(default="stac-fastapi")
 
+
+    def filter_by_access(self, username: str, data: list):
+        output_data = []
+        for d in data:
+            try:
+                if d["_sfapi_internal"]["inf_public"] or d["_sfapi_internal"]["owner"] == username:
+                    output_data.append(d)
+            except KeyError:
+                logger.error(f"No access control found for catalog {d['id']}")
+        return output_data
+
+
+
     def _landing_page(
         self,
         base_url: str,
@@ -212,25 +225,9 @@ class CoreClient(AsyncBaseCoreClient):
 
         catalogs = []
 
-        while True:
-            temp_catalogs, next_token = await self.database.get_catalog_subcatalogs(
-                token=None, limit=NUMBER_OF_CATALOG_COLLECTIONS, base_url=base_url
-            )
+        temp_catalogs = await self.database.get_catalog_subcatalogs(base_url=base_url)
 
-            for catalog in temp_catalogs:
-                # Get access control array for each catalog
-                try:
-                    access_control = catalog["access_control"]
-                    # Append catalog to list if user has access
-                    # Convert to int to ensure 0 is falsy and 1 is truthy
-                    if int(access_control[-1]) or int(access_control[user_index]):
-                        catalogs.append(catalog)
-                except KeyError:
-                    logger.error(f"No access control found for catalog {catalog['id']}")
-
-            # If catalogs now less than limit, will need to run search again, giving next_token
-            if len(catalogs) >= NUMBER_OF_CATALOG_COLLECTIONS or not next_token:
-                break
+        catalogs = self.filter_by_access(username, temp_catalogs)
 
         for catalog in catalogs:
             landing_page["links"].append(
@@ -363,39 +360,11 @@ class CoreClient(AsyncBaseCoreClient):
 
         collections = []
 
-        while True:
-            temp_collections, next_token, hit_tokens = (
-                await self.database.get_all_collections(
-                    token=token, limit=limit, base_url=base_url
-                )
+        collections, next_token = (
+            await self.database.get_all_collections(
+                token=token, limit=limit, base_url=base_url, username=username
             )
-
-            for i, (collection, hit_token) in enumerate(
-                zip(temp_collections, hit_tokens)
-            ):
-                # Get access control array for each collection
-                try:
-                    access_control = collection["access_control"]
-                    collection.pop("access_control")
-                    # Append collection to list if user has access
-                    if int(access_control[-1]) or int(access_control[user_index]):
-                        collections.append(collection)
-                        if len(collections) >= limit:
-                            # Extract token from last result
-                            if i < len(temp_collections) - 1:
-                                next_token = hit_token
-                                break
-                except KeyError:
-                    logger.error(
-                        f"No access control found for collection {collection['id']}"
-                    )
-
-            # If collections now less than limit and more results, will need to run search again, giving next_token
-            if len(collections) >= limit or not next_token:
-                # TODO: implement smarter token logic to return token of last returned ES entry
-                next_token = token
-                break
-            token = next_token
+        )
 
         links = [
             {"rel": Relations.root.value, "type": MimeTypes.json, "href": base_url},
@@ -443,69 +412,33 @@ class CoreClient(AsyncBaseCoreClient):
 
             # Get access control array for each catalog
             try:
-                access_control = catalog["access_control"]
-                catalog.pop("access_control")
                 # Check access control
-                if not int(access_control[-1]):  # Catalog is private
-                    if username == "":  # User is not logged in
-                        raise HTTPException(
-                            status_code=401, detail="User is not authenticated"
-                        )
-                    elif not int(
-                        access_control[user_index]
-                    ):  # User is logged in but not authorized
-                        raise HTTPException(
-                            status_code=403,
-                            detail="User does not have access to this Catalog",
-                        )
+                if not catalog["_sfapi_internal"]["owner"] == username:
+                    if not catalog["_sfapi_internal"]["inf_public"]:  # Catalog is private
+                        if username == "":  # User is not logged in
+                            raise HTTPException(
+                                status_code=401, detail="User is not authenticated"
+                            )
+                        else:  # User is logged in but not authorized
+                            raise HTTPException(
+                                status_code=403,
+                                detail="User does not have access to this Catalog",
+                            )
             except KeyError:
                 logger.error(f"No access control found for catalog {catalog['id']}")
-                if username == "":  # User is not logged in
-                    raise HTTPException(
-                        status_code=401, detail="User is not authenticated"
-                    )
-                else:  # User is logged in but still can't determine access
-                    raise HTTPException(
-                        status_code=403,
-                        detail="User does not have access to this Catalog",
-                    )
+                return Catalogs(catalogs=[], links=[])
 
-        catalogs = []
-
-        while True:
-            # Search is run continually until limit is reached or no more results
-            temp_catalogs, next_token, hit_tokens = (
-                await self.database.get_all_catalogs(
-                    catalog_path=catalog_path,
-                    token=token,
-                    limit=limit,
-                    base_url=base_url,
-                    user_index=user_index,
-                    conformance_classes=self.conformance_classes(),
-                )
+        # Search is run continually until limit is reached or no more results
+        catalogs, next_token = (
+            await self.database.get_all_catalogs(
+                catalog_path=catalog_path,
+                token=token,
+                limit=limit,
+                base_url=base_url,
+                username=username,
+                conformance_classes=self.conformance_classes(),
             )
-
-            for i, (catalog, hit_token) in enumerate(zip(temp_catalogs, hit_tokens)):
-                # Get access control array for each catalog
-                try:
-                    access_control = catalog["access_control"]
-                    catalog.pop("access_control")
-                    # Add catalog to list if user has access
-                    if int(access_control[-1]) or int(access_control[user_index]):
-                        catalogs.append(catalog)
-                        if len(catalogs) >= limit:
-                            if i < len(temp_catalogs) - 1:
-                                # Extract token from last result
-                                next_token = hit_token
-                                break
-                except KeyError:
-                    logger.error(f"No access control found for catalog {catalog['id']}")
-
-            # If catalogs now less than limit and more results, will need to run search again, giving next_token
-            if len(catalogs) >= limit or not next_token:
-                # TODO: implement smarter token logic to return token of last returned ES entry
-                break
-            token = next_token
+        )
 
         links = [
             {"rel": Relations.root.value, "type": MimeTypes.json, "href": base_url},
@@ -555,21 +488,18 @@ class CoreClient(AsyncBaseCoreClient):
         user_index = hash_to_index(username)
         # Get access control array for each collection
         try:
-            access_control = collection["access_control"]
-            collection.pop("access_control")
             # Check access control
-            if not int(access_control[-1]):  # Collection is private
-                if username == "":  # User is not logged in
-                    raise HTTPException(
-                        status_code=401, detail="User is not authenticated"
-                    )
-                elif not int(
-                    access_control[user_index]
-                ):  # User is logged in but not authorized
-                    raise HTTPException(
-                        status_code=403,
-                        detail="User does not have access to this Collection",
-                    )
+            if not collection["_sfapi_internal"]["owner"] == username:
+                if not collection["_sfapi_internal"]["inf_public"]:  # Collection is private
+                    if username == "":  # User is not logged in
+                        raise HTTPException(
+                            status_code=401, detail="User is not authenticated"
+                        )
+                    else:  # User is logged in but not authorized
+                        raise HTTPException(
+                            status_code=403,
+                            detail="User does not have access to this Collection",
+                        )
         except KeyError:
             logger.error(f"No access control found for collection {collection['id']}")
             if username == "":  # User is not logged in
@@ -619,21 +549,18 @@ class CoreClient(AsyncBaseCoreClient):
         user_index = hash_to_index(username)
         # Get access control array for each catalog
         try:
-            access_control = catalog["access_control"]
-            catalog.pop("access_control")
             # Check access control
-            if not int(access_control[-1]):  # Catalog is private
-                if username == "":  # User is not logged in
-                    raise HTTPException(
-                        status_code=401, detail="User is not authenticated"
-                    )
-                elif not int(
-                    access_control[user_index]
-                ):  # User is logged in but not authorized
-                    raise HTTPException(
-                        status_code=403,
-                        detail="User does not have access to this Catalog",
-                    )
+            if not catalog["_sfapi_internal"]["owner"] == username:
+                if not catalog["_sfapi_internal"]["inf_public"]:  # Catalog is private
+                    if username == "":  # User is not logged in
+                        raise HTTPException(
+                            status_code=401, detail="User is not authenticated"
+                        )
+                    else:  # User is logged in but not authorized
+                        raise HTTPException(
+                            status_code=403,
+                            detail="User does not have access to this Catalog",
+                        )
         except KeyError:
             logger.error(f"No access control found for catalog {catalog['id']}")
             if username == "":  # User is not logged in
@@ -644,49 +571,24 @@ class CoreClient(AsyncBaseCoreClient):
                 )
 
         # Assume at most 100 collections in a catalog for the time being, may need to increase
-        collections, _, _ = await self.database.get_catalog_collections(
+        temp_collections = await self.database.get_catalog_collections(
             catalog_path=catalog_path,
             base_url=base_url,
             limit=NUMBER_OF_CATALOG_COLLECTIONS,
             token=None,
+            user_index=user_index,
         )
 
         # Check if current user has access to each collection
-        for collection in collections[:]:
-            # Get access control array for each collection
-            try:
-                access_control = collection["access_control"]
-                collection.pop("access_control")
-                # Remove collection from list if user does not have access
-                if not int(access_control[-1]) and not int(access_control[user_index]):
-                    collections.remove(collection)
-            except KeyError:
-                logger.error(
-                    f"No access control found for collection {collection['id']}"
-                )
-                collections.remove(collection)
+        collections = self.filter_by_access(username, temp_collections)
 
-        sub_catalogs, _ = await self.database.get_catalog_subcatalogs(
+        temp_sub_catalogs = await self.database.get_catalog_subcatalogs(
             catalog_path=catalog_path,
             base_url=base_url,
-            limit=NUMBER_OF_CATALOG_COLLECTIONS,
-            token=None,
         )
 
         # Check if current user has access to each collection
-        for sub_catalog in sub_catalogs[:]:
-            # Get access control array for each catalog
-            try:
-                access_control = sub_catalog["access_control"]
-                sub_catalog.pop("access_control")
-                # Remove catalog from list if user does not have access
-                if not int(access_control[-1]) and not int(access_control[user_index]):
-                    sub_catalogs.remove(sub_catalog)
-            except KeyError:
-                logger.error(
-                    f"No access control found for sub-catalog {sub_catalog['id']}"
-                )
-                sub_catalogs.remove(sub_catalog)
+        sub_catalogs = self.filter_by_access(username, temp_sub_catalogs)
 
         return self.catalog_serializer.db_to_stac(
             catalog_path=parent_catalog_path,
@@ -745,20 +647,18 @@ class CoreClient(AsyncBaseCoreClient):
 
         # Get access control array for the collection
         try:
-            access_control = collection["access_control"]
             # Check access control
-            if not int(access_control[-1]):  # Collection is private
-                if username == "":  # User is not logged in
-                    raise HTTPException(
-                        status_code=401, detail="User is not authenticated"
-                    )
-                elif not int(
-                    access_control[user_index]
-                ):  # User is logged in but not authorized
-                    raise HTTPException(
-                        status_code=403,
-                        detail="User does not have access to this Collection",
-                    )
+            if not collection["_sfapi_internal"]["owner"] == username:
+                if not collection["_sfapi_internal"]["inf_public"]:  # Collection is private
+                    if username == "":  # User is not logged in
+                        raise HTTPException(
+                            status_code=401, detail="User is not authenticated"
+                        )
+                    else:  # User is logged in but not authorized
+                        raise HTTPException(
+                            status_code=403,
+                            detail="User does not have access to this Collection",
+                        )
         except KeyError:
             logger.error(f"No access control found for collection {collection['id']}")
             if username == "":  # User is not logged in
@@ -790,12 +690,13 @@ class CoreClient(AsyncBaseCoreClient):
             search = self.database.apply_bbox_filter(search=search, bbox=bbox)
 
         # No further access control needed as already checked above for collection
-        items, maybe_count, next_token, _ = await self.database.execute_search(
+        items_and_cat_paths, maybe_count, next_token = await self.database.execute_search(
             search=search,
             catalog_paths=[catalog_path],
             limit=limit,
             sort=None,
             token=token,  # type: ignore
+            username=username,
             collection_ids=[collection_id],
         )
 
@@ -803,9 +704,9 @@ class CoreClient(AsyncBaseCoreClient):
         # from search results in a tuple
         items = [
             self.item_serializer.db_to_stac(
-                catalog_path=catalog_path, item=item[0], base_url=base_url
+                catalog_path=catalog_path, item=item_and_cat_path[0], base_url=base_url
             )
-            for item in items
+            for item_and_cat_path in items_and_cat_paths
         ]
 
         context_obj = None
@@ -868,20 +769,18 @@ class CoreClient(AsyncBaseCoreClient):
         user_index = hash_to_index(username)
         # Get access control array for each collection
         try:
-            access_control = collection["access_control"]
             # Check access control
-            if not int(access_control[-1]):  # Collection is private
-                if username == "":  # User is not logged in
-                    raise HTTPException(
-                        status_code=401, detail="User is not authenticated"
-                    )
-                elif not int(
-                    access_control[user_index]
-                ):  # User is logged in but not authorized
-                    raise HTTPException(
-                        status_code=403,
-                        detail="User does not have access to this Collection",
-                    )
+            if not collection["_sfapi_internal"]["owner"] == username:
+                if not collection["_sfapi_internal"]["inf_public"]:  # Collection is private
+                    if username == "":  # User is not logged in
+                        raise HTTPException(
+                            status_code=401, detail="User is not authenticated"
+                        )
+                    else:  # User is logged in but not authorized
+                        raise HTTPException(
+                            status_code=403,
+                            detail="User does not have access to this Collection",
+                        )
         except KeyError:
             logger.error(f"No access control found for collection {collection['id']}")
             if username == "":  # User is not logged in
@@ -1169,9 +1068,8 @@ class CoreClient(AsyncBaseCoreClient):
             catalog = await self.database.find_catalog(catalog_path=catalog_path)
             # Get access control array for each catalog
             try:
-                access_control = catalog["access_control"]
                 # Remove catalog from list if user does not have access
-                if not int(access_control[-1]) and not int(access_control[user_index]):
+                if not catalog["_sfapi_internal"]["owner"] == username and not catalog["_sfapi_internal"]["inf_public"]:
                     search_request.catalog_paths.remove(catalog_path)
             except KeyError:
                 logger.error(f"No access control found for catalog {catalog['id']}")
@@ -1186,11 +1084,8 @@ class CoreClient(AsyncBaseCoreClient):
                 )
                 # Get access control array for each collection
                 try:
-                    access_control = collection["access_control"]
                     # Remove catalog from list if user does not have access
-                    if not int(access_control[-1]) and not int(
-                        access_control[user_index]
-                    ):
+                    if not collection["_sfapi_internal"]["owner"] == username and not collection["_sfapi_internal"]["inf_public"]:
                         search_request.collections.remove(collection_id)
                 except KeyError:
                     logger.error(
@@ -1216,80 +1111,25 @@ class CoreClient(AsyncBaseCoreClient):
                 context={"returned": 0, "limit": limit},
             )
 
-        while True:
-            temp_items, maybe_count, next_token, hit_tokens = (
-                await self.database.execute_search(
-                    search=search,
-                    limit=limit,
-                    token=token,  # type: ignore
-                    sort=sort,
-                    collection_ids=search_request.collections,
-                    catalog_paths=search_request.catalog_paths,
-                )
+        items_and_cat_paths, maybe_count, next_token = (
+            await self.database.execute_search(
+                search=search,
+                limit=limit,
+                token=token,  # type: ignore
+                sort=sort,
+                username=username,
+                collection_ids=search_request.collections,
+                catalog_paths=search_request.catalog_paths,
             )
-
-            # Filter results to those that are accessible to the user
-            for i, (item, hit_token) in enumerate(zip(temp_items, hit_tokens)):
-                # Get item index for path extraction
-                item_catalog_path = item[1]
-                # Get parent collection if collection is present
-                if "collection" in item[0]:
-                    parent_collection = item[0]["collection"]
-                    # Retrive collection data
-                    collection = await self.database.find_collection(
-                        catalog_path=item_catalog_path,
-                        collection_id=parent_collection,
-                    )
-                    # Get access control array for this collection
-                    try:
-                        access_control = collection["access_control"]
-                        # Append item to list if user has access
-                        if int(access_control[-1]) or int(access_control[user_index]):
-                            items.append(item)
-                            if len(items) >= limit:
-                                if i < len(temp_items) - 1:
-                                    # Extract token from last result
-                                    next_token = hit_token
-                                    break
-                    except KeyError:
-                        logger.error(
-                            f"No access control found for collection {collection['id']}"
-                        )
-
-                # Get parent catalog if collection is not present
-                else:
-                    # Get access control array for this catalog
-                    catalog = await self.database.find_catalog(
-                        catalog_path=item_catalog_path
-                    )
-                    try:
-                        access_control = catalog["access_control"]
-                        # Append item to list if user has access
-                        if int(access_control[-1]) or int(access_control[user_index]):
-                            items.append(item)
-                            if len(items) >= limit:
-                                # Extract token from last result
-                                if i < len(temp_items) - 1:
-                                    next_token = hit_token
-                                    break
-                    except KeyError:
-                        logger.error(
-                            f"No access control found for catalog {catalog['id']}"
-                        )
-
-            # If items now less than limit and more results, will need to run search again, giving next_token
-            if len(items) >= limit or not next_token:
-                # TODO: implement smarter token logic to return token of last returned ES entry
-                break
-            token = next_token
+        )
 
         # To handle catalog_id in links execute_search also returns the catalog_id
         # from search results in a tuple
         items = [
             self.item_serializer.db_to_stac(
-                item=item[0], base_url=base_url, catalog_path=item[1]
+                item=item_and_cat_path[0], base_url=base_url, catalog_path=item_and_cat_path[1]
             )
-            for item in items
+            for item_and_cat_path in items_and_cat_paths
         ]
 
         if self.extension_is_enabled("FieldsExtension"):
@@ -1484,20 +1324,18 @@ class CoreClient(AsyncBaseCoreClient):
         catalog = await self.database.find_catalog(catalog_path=catalog_path)
         # Get access control array for each catalog
         try:
-            access_control = catalog["access_control"]
             # Check access control
-            if not int(access_control[-1]):  # Collection is private
-                if username == "":  # User is not logged in
-                    raise HTTPException(
-                        status_code=401, detail="User is not authenticated"
-                    )
-                elif not int(
-                    access_control[user_index]
-                ):  # User is logged in but not authorized
-                    raise HTTPException(
-                        status_code=403,
-                        detail="User does not have access to this Catalog",
-                    )
+            if not catalog["_sfapi_internal"]["owner"] == username:
+                if not catalog["_sfapi_internal"]["inf_public"]:  # Collection is private
+                    if username == "":  # User is not logged in
+                        raise HTTPException(
+                            status_code=401, detail="User is not authenticated"
+                        )
+                    else:  # User is logged in but not authorized
+                        raise HTTPException(
+                            status_code=403,
+                            detail="User does not have access to this Catalog",
+                        )
         except KeyError:
             logger.error(f"No access control found for catalog {catalog['id']}")
             if username == "":  # User is not logged in
@@ -1519,9 +1357,8 @@ class CoreClient(AsyncBaseCoreClient):
             )
             # Get access control array for each collection
             try:
-                access_control = collection["access_control"]
                 # Remove catalog from list if user does not have access
-                if not int(access_control[-1]) and not int(access_control[user_index]):
+                if not collection["_sfapi_internal"]["owner"] == username and not collection["_sfapi_internal"]["inf_public"]:
                     collections.remove(collection_id)
             except KeyError:
                 logger.error(
@@ -1591,79 +1428,25 @@ class CoreClient(AsyncBaseCoreClient):
 
         items = []
 
-        while True:
-            temp_items, maybe_count, next_token, hit_tokens = (
-                await self.database.execute_search(
-                    search=search,
-                    limit=limit,
-                    token=token,  # type: ignore
-                    sort=sort,
-                    collection_ids=collections,
-                    catalog_paths=[catalog_path],
-                )
+        items_and_cat_paths, maybe_count, next_token = (
+            await self.database.execute_search(
+                search=search,
+                limit=limit,
+                token=token,  # type: ignore
+                sort=sort,
+                collection_ids=collections,
+                catalog_paths=[catalog_path],
+                username=username,
             )
-
-            # Filter results to those that are accessible to the user
-            for i, (item, hit_token) in enumerate(zip(temp_items, hit_tokens)):
-                # Get item index for path extraction
-                item_catalog_path = item[1]
-                # Get parent collection if collection is present
-                if "collection" in item[0]:
-                    parent_collection = item[0]["collection"]
-                    # Retrive collection data
-                    collection = await self.database.find_collection(
-                        catalog_path=item_catalog_path,
-                        collection_id=parent_collection,
-                    )
-                    # Get access control array for this collection
-                    try:
-                        access_control = collection["access_control"]
-                        # Append item to list if user has access
-                        if int(access_control[-1]) or int(access_control[user_index]):
-                            items.append(item)
-                            if len(items) >= limit:
-                                if i < len(temp_items) - 1:
-                                    # Extract token from last result
-                                    next_token = hit_token
-                                    break
-                    except KeyError:
-                        logger.error(
-                            f"Access control not found for collection {collection['id']}"
-                        )
-                # Get parent catalog if collection is not present
-                else:
-                    # Get access control array for this catalog
-                    catalog = await self.database.find_catalog(
-                        catalog_path=item_catalog_path
-                    )
-                    try:
-                        access_control = catalog["access_control"]
-                        # Append item to list if user has access
-                        if int(access_control[-1]) or int(access_control[user_index]):
-                            items.append(item)
-                            if len(items) >= limit:
-                                if i < len(temp_items) - 1:
-                                    # Extract token from last result
-                                    next_token = hit_token
-                                    break
-                    except KeyError:
-                        logger.error(
-                            f"Catalog access control not found for catalog {catalog['id']}"
-                        )
-
-            # If items now less than limit and more results, will need to run search again, giving next_token
-            if len(items) >= limit or not next_token:
-                # TODO: implement smarter token logic to return token of last returned ES entry
-                break
-            token = next_token
+        )
 
         # To handle catalog_id in links execute_search also returns the catalog_id
         # from search results in a tuple
         items = [
             self.item_serializer.db_to_stac(
-                item=item[0], base_url=base_url, catalog_path=item[1]
+                item=item_and_cat_path[0], base_url=base_url, catalog_path=item_and_cat_path[1]
             )
-            for item in items
+            for item_and_cat_path in items_and_cat_paths
         ]
 
         if self.extension_is_enabled("FieldsExtension"):
@@ -1735,7 +1518,6 @@ class TransactionsClient(AsyncBaseTransactionsClient):
             item (stac_types.Item): The item to be added to the collection.
             username_header (dict): X-Username header from the request.
             workspace (str): The workspace being used to create the item.
-            is_public (bool): Whether the item is public or not.
             **kwargs: Additional keyword arguments.
 
         Returns:
@@ -1752,25 +1534,21 @@ class TransactionsClient(AsyncBaseTransactionsClient):
 
         base_url = str(kwargs["request"].base_url)
 
-        # Confirm that the workspace provides correct access to the part of the catalogue to be altered
-        # check kubernetes manifest for given workspace to confirm access
-        # TODO: use Kubernetes API to confirm sub-catalog path access required for transaction
-        # For now, if this is a user workspace, confirm the changes are being made to the user's own workspace sub-catalog
-        # e.g. user-datasets/user-workspace/collection
-        if workspace != "default_workspace":
-            catalog_path_with_slash = f"{catalog_path}/" if catalog_path else ""
-            # This workspace can only write to the user-datasets/user-workspace sub-catalog
-            if not catalog_path or not catalog_path_with_slash.startswith(
-                f"user-datasets/{workspace}/"
-            ):
-                raise HTTPException(
-                    status_code=403,
-                    detail=f"Workspace {workspace} does not have access to {catalog_path if catalog_path else 'top-level'} catalog",
-                )
+        # Confirm user has access to parent collection
+        # Retrieve catalog to confirm owning workspace
+        collection = await self.database.find_collection(
+            collection_id=collection_id, catalog_path=catalog_path
+        )
+        owner = collection["_sfapi_internal"]["owner"]
+
+        if owner != workspace:
+            raise HTTPException(
+                status_code=403, detail="Workspace does not have access to the parent Collection"
+            )
 
         if collection_id != item["collection"]:
             raise Exception(
-                f"The provided collection id and that found in the item do not match: {collection_id}, {item['collection']}"
+                f"The provided collection id and that found in the item do not match: {collection_id} : {item['collection']}"
             )
 
         # If a feature collection is posted
@@ -1831,23 +1609,20 @@ class TransactionsClient(AsyncBaseTransactionsClient):
         now = datetime_type.now(timezone.utc).isoformat().replace("+00:00", "Z")
         item["properties"]["updated"] = now
 
-        # Confirm that the workspace provides correct access to the part of the catalogue to be altered
-        # check kubernetes manifest for given workspace to confirm access
-        # TODO: use Kubernetes API to confirm sub-catalog path access required for transaction
-        # For now, if this is a user workspace, confirm the changes are being made to the user's own workspace sub-catalog
-        # e.g. user-datasets/user-workspace/collection
-        if workspace != "default_workspace":
-            catalog_path_with_slash = f"{catalog_path}/" if catalog_path else ""
-            # This workspace can only write to the user-datasets/user-workspace sub-catalog
-            if not catalog_path or not catalog_path_with_slash.startswith(
-                f"user-datasets/{workspace}/"
-            ):
-                raise HTTPException(
-                    status_code=403,
-                    detail=f"Workspace {workspace} does not have access to {catalog_path if catalog_path else 'top-level'} catalog",
-                )
+        # Check the owner of the specified parent collection
+        collection = await self.database.find_collection(
+            collection_id=collection_id, catalog_path=catalog_path
+        )
+        collection_owner = collection["_sfapi_internal"]["owner"]
 
-        # Note, if the provided item is not valid stac, this may delete the item and them fail to create the new one
+        # Confirm that the workspace provides correct access to the part of the catalogue to be altered
+        if workspace != collection_owner:
+            raise HTTPException(
+                status_code=403,
+                detail=f"Workspace {workspace} does not have access to parent Collection {collection_id} at {catalog_path if catalog_path else 'top-level'} catalog",
+            )
+
+        # Note, if the provided item is not valid stac, this may delete the item and then fail to create the new one
 
         await self.database.check_collection_exists(
             collection_id=collection_id, catalog_path=catalog_path
@@ -1890,21 +1665,18 @@ class TransactionsClient(AsyncBaseTransactionsClient):
         """
         logger.info("Deleting item")
 
-        # Confirm that the workspace provides correct access to the part of the catalogue to be altered
-        # check kubernetes manifest for given workspace to confirm access
-        # TODO: use Kubernetes API to confirm sub-catalog path access required for transaction
-        # For now, if this is a user workspace, confirm the changes are being made to the user's own workspace sub-catalog
-        # e.g. user-datasets/user-workspace/collection
-        if workspace != "default_workspace":
-            catalog_path_with_slash = f"{catalog_path}/" if catalog_path else ""
-            # This workspace can only write to the user-datasets/user-workspace sub-catalog
-            if not catalog_path or not catalog_path_with_slash.startswith(
-                f"user-datasets/{workspace}/"
-            ):
-                raise HTTPException(
-                    status_code=403,
-                    detail=f"Workspace {workspace} does not have access to {catalog_path if catalog_path else 'top-level'} catalog",
-                )
+        # Confirm user has access to this part of the catalog
+        # Retrive collection to confirm owning workspace
+        collection = await self.database.find_collection(
+            catalog_path=catalog_path, collection_id=collection_id
+        )
+        owner = collection["_sfapi_internal"]["owner"]
+
+        if owner != workspace:
+            raise HTTPException(
+                status_code=403,
+                detail="Workspace does not have access to the parent Collection"
+            )
 
         await self.database.delete_item(
             item_id=item_id, collection_id=collection_id, catalog_path=catalog_path
@@ -1917,7 +1689,6 @@ class TransactionsClient(AsyncBaseTransactionsClient):
         catalog_path: str,
         collection: stac_types.Collection,
         workspace: str,
-        is_public: bool = False,
         **kwargs,
     ) -> stac_types.Collection:
         """Create a new collection in the database.
@@ -1938,45 +1709,38 @@ class TransactionsClient(AsyncBaseTransactionsClient):
         """
         logger.info("Creating collection")
 
-        # Handle case where no catalog is provided
+        # Handle case where no collection is provided
         if not collection:
             raise HTTPException(status_code=400, detail="No collection provided")
+        
+        # Only default workspace can alter top-level catalogs
+        if not catalog_path and workspace != "default_workspace":
+            HTTPException(
+                status_code=403,
+                detail=f"Workspace does not have access to top-level catalog",
+            )
+
+        # Determine public setting
+        if workspace == "default_workspace":
+            is_public = True
+        else:
+            is_public = False
 
         base_url = str(kwargs["request"].base_url)
 
-        # Confirm that the workspace provides correct access to the part of the catalogue to be altered
-        # check kubernetes manifest for given workspace to confirm access
-        # TODO: use Kubernetes API to confirm sub-catalog path access required for transaction
-        # For now, if this is a user workspace, confirm the changes are being made to the user's own workspace sub-catalog
-        # e.g. user-datasets/user-workspace/collection
-        if workspace != "default_workspace":
-            catalog_path_with_slash = f"{catalog_path}/" if catalog_path else ""
-            # This workspace can only write to the user-datasets/user-workspace sub-catalog
-            if not catalog_path or not catalog_path_with_slash.startswith(
-                f"user-datasets/{workspace}/"
-            ):
-                raise HTTPException(
-                    status_code=403,
-                    detail=f"Workspace {workspace} does not have access to {catalog_path if catalog_path else 'top-level'} catalog",
-                )
+        # Confirm user has access to parent catalog
+        # Retrive catalog to confirm owning workspace
+        parent_catalog = await self.database.find_catalog(catalog_path=catalog_path)
+        owner = parent_catalog["_sfapi_internal"]["owner"]
 
-        # Handle case where entry is not public, use catalog id instead
-        if workspace == "default_workspace" and not is_public:
-            # Should only be used to create top-level workspace catalogs e.g. user-datasets/<workspace-name>
-            catalog_path_list = catalog_path.split("/")
-            if catalog_path_list[0] == "user-datasets":
-                username = catalog_path_list[1]
-            else:
-                raise HTTPException(
-                    status_code=400, detail="Username not provided for private entry"
-                )
-        elif not is_public:
-            username = workspace
-        else:
-            username = ""
-
-        # Generate bitstring for entry
-        bitstring = "".join(create_bitstring(uid=username, is_public=is_public))
+        if owner != workspace:
+            raise HTTPException(
+                status_code=403, detail="Workspace does not have access to this Catalog"
+            )
+        
+        # If the ingester is attempting to create a private entry in a user workspace, this might need to be set public based on the parent catalog access control
+        if parent_catalog and not is_public and parent_catalog["_sfapi_internal"].get("rec_public", False):
+            is_public = True
 
         collection = self.database.collection_serializer.stac_to_db(
             collection, base_url
@@ -1985,7 +1749,10 @@ class TransactionsClient(AsyncBaseTransactionsClient):
             catalog_path=catalog_path, collection=collection, base_url=base_url
         )
         await self.database.create_collection(
-            catalog_path=catalog_path, collection=collection, access_control=bitstring
+            catalog_path=catalog_path,
+            collection=collection,
+            owner=workspace,
+            is_public=is_public,
         )
         return CollectionSerializer.db_to_stac(
             catalog_path=catalog_path, collection=collection, base_url=base_url
@@ -2021,21 +1788,19 @@ class TransactionsClient(AsyncBaseTransactionsClient):
         logger.info("Updating collection")
         base_url = str(kwargs["request"].base_url)
 
+        # Check the owner of the specified collection
+        old_collection = await self.database.find_collection(
+            collection_id=collection_id, catalog_path=catalog_path
+        )
+        annotations = old_collection["_sfapi_internal"]
+        collection_owner = annotations["owner"]
+
         # Confirm that the workspace provides correct access to the part of the catalogue to be altered
-        # check kubernetes manifest for given workspace to confirm access
-        # TODO: use Kubernetes API to confirm sub-catalog path access required for transaction
-        # For now, if this is a user workspace, confirm the changes are being made to the user's own workspace sub-catalog
-        # e.g. user-datasets/user-workspace/collection
-        if workspace != "default_workspace":
-            catalog_path_with_slash = f"{catalog_path}/" if catalog_path else ""
-            # This workspace can only write to the user-datasets/user-workspace sub-catalog
-            if not catalog_path or not catalog_path_with_slash.startswith(
-                f"user-datasets/{workspace}/"
-            ):
-                raise HTTPException(
-                    status_code=403,
-                    detail=f"Workspace {workspace} does not have access to {catalog_path if catalog_path else 'top-level'} catalog",
-                )
+        if workspace != collection_owner:
+            raise HTTPException(
+                status_code=403,
+                detail=f"Workspace {workspace} does not have access to {catalog_path if catalog_path else 'top-level'} catalog",
+            )
 
         collection = self.database.collection_serializer.stac_to_db(
             collection, base_url
@@ -2044,6 +1809,7 @@ class TransactionsClient(AsyncBaseTransactionsClient):
             catalog_path=catalog_path,
             collection_id=collection_id,
             collection=collection,
+            annotations={"_sfapi_internal": annotations},
         )
 
         return CollectionSerializer.db_to_stac(
@@ -2073,26 +1839,111 @@ class TransactionsClient(AsyncBaseTransactionsClient):
         """
         logger.info("Deleting collection")
 
-        # Confirm that the workspace provides correct access to the part of the catalogue to be altered
-        # check kubernetes manifest for given workspace to confirm access
-        # TODO: use Kubernetes API to confirm sub-catalog path access required for transaction
-        # For now, if this is a user workspace, confirm the changes are being made to the user's own workspace sub-catalog
-        # e.g. user-datasets/user-workspace/collection
-        if workspace != "default_workspace":
-            catalog_path_with_slash = f"{catalog_path}/" if catalog_path else ""
-            # This workspace can only write to the user-datasets/user-workspace sub-catalog
-            if not catalog_path or not catalog_path_with_slash.startswith(
-                f"user-datasets/{workspace}/"
-            ):
-                raise HTTPException(
-                    status_code=403,
-                    detail=f"Workspace {workspace} does not have access to {catalog_path if catalog_path else 'top-level'} catalog",
-                )
+        # Confirm user has access to this part of the catalog
+        # Retrive collection to confirm owning workspace
+        collection = await self.database.find_collection(
+            catalog_path=catalog_path, collection_id=collection_id
+        )
+        owner = collection["_sfapi_internal"]["owner"]
+
+        if owner != workspace:
+            raise HTTPException(
+                status_code=403, detail="Workspace does not have access to this Catalog"
+            )
 
         await self.database.delete_collection(
             collection_id=collection_id, catalog_path=catalog_path
         )
         return None
+
+    async def update_catalog_access_control(
+        self,
+        workspace: str,
+        catalog_path: str,
+        access_policy: stac_types.AccessPolicy,
+        **kwargs,
+    ):
+
+        # Get catalog_id from path
+        catalog_path_list = catalog_path.split("/")
+        catalog_id = catalog_path_list[-1]
+        parent_catalog_path = (
+            "/".join(catalog_path_list[:-1])
+            if len(catalog_path_list) > 1
+            else "top-level Catalog"
+        )
+
+        logger.info(
+            "Updating access control for Catalog %s in Catalog %s",
+            catalog_id,
+            parent_catalog_path,
+        )
+
+        access_list = []
+        is_public = access_policy.get("public", False)
+
+        # Retrive catalog to confirm owning workspace
+        catalog = await self.database.find_catalog(catalog_path=catalog_path)
+        owner = catalog["_sfapi_internal"]["owner"]
+
+        if owner != workspace:
+            raise HTTPException(
+                status_code=403, detail="Workspace does not have access to this Catalog"
+            )
+
+        await self.database.update_catalog_access_control(
+            catalog_path=catalog_path,
+            owner=owner,
+            is_public=is_public,
+        )
+
+        logger.info(
+            f"Updated access for Catalog {catalog_id} in Catalog {parent_catalog_path} to "
+            f"be {'public' if is_public else 'private'} with access for {access_list}"
+        )
+
+    @overrides
+    async def update_collection_access_control(
+        self,
+        workspace: str,
+        collection_id: str,
+        access_policy: stac_types.AccessPolicy,
+        catalog_path: Optional[str] = None,
+        **kwargs,
+    ):
+
+        logger.info(
+            "Updating access control for Collection %s in Catalog %s",
+            collection_id,
+            catalog_path,
+        )
+
+        access_list = []
+        is_public = access_policy.get("public", False)
+
+        # Retrive catalog to confirm owning workspace
+        collection = await self.database.find_collection(
+            catalog_path=catalog_path, collection_id=collection_id
+        )
+        owner = collection["_sfapi_internal"]["owner"]
+
+        if owner != workspace:
+            raise HTTPException(
+                status_code=403,
+                detail="Workspace does not have access to this Collection",
+            )
+
+        await self.database.update_collection_access_control(
+            catalog_path=catalog_path,
+            collection_id=collection_id,
+            owner=owner,
+            is_public=is_public,
+        )
+
+        logger.info(
+            f"Updated access for Collection {collection_id} in Catalog {catalog_path} to "
+            f"be {'public' if is_public else 'private'} with access for {access_list}"
+        )
 
     @overrides
     async def create_catalog(
@@ -2100,17 +1951,16 @@ class TransactionsClient(AsyncBaseTransactionsClient):
         catalog: stac_types.Catalog,
         workspace: str,
         catalog_path: Optional[str] = None,
-        is_public: bool = False,
         **kwargs,
     ) -> stac_types.Catalog:
         """Create a new catalog in the database.
 
         Args:
             catalog (stac_types.Catalog): The catalog to be created.
-            username_header (dict): X-Username header from the request.
             workspace (str): The workspace being used to create the catalog.
             catalog_path (Optional[str]): The path to the catalog to be created.
             is_public (bool): Whether the catalog is public or not.
+            access_list (List[str]): List of users who have access to the catalog.
             **kwargs: Additional keyword arguments.
 
         Returns:
@@ -2121,53 +1971,45 @@ class TransactionsClient(AsyncBaseTransactionsClient):
         """
         logger.info("Creating catalog")
 
+        logger.info(catalog_path)
+
         # Handle case where no catalog is provided
         if not catalog:
             raise HTTPException(status_code=400, detail="No catalog provided")
+        
+        # Only default workspace can alter top-level catalogs
+        if not catalog_path and workspace != "default_workspace":
+            HTTPException(
+                status_code=403,
+                detail=f"Workspace does not have access to top-level catalog",
+            )
+
+        # Determine public setting
+        if workspace == "default_workspace":
+            is_public = True
+        else:
+            is_public = False
 
         base_url = str(kwargs["request"].base_url)
 
-        # Confirm that the workspace provides correct access to the part of the catalogue to be altered
-        # check kubernetes manifest for given workspace to confirm access
-        # TODO: use Kubernetes API to confirm sub-catalog path access required for transaction
-        # For now, if this is a user workspace, confirm the changes are being made to the user's own workspace sub-catalog
-        # e.g. user-datasets/user-workspace/collection
-        if workspace != "default_workspace":
-            catalog_path_with_slash = f"{catalog_path}/" if catalog_path else ""
-            # This workspace can create its own subcatalog with the same id as the workspace name
-            if (
-                catalog_path
-                and catalog_path.startswith("user-datasets")
-                and catalog["id"] == workspace
-            ):
-                username = workspace
-            # This workspace can then only write to the user-datasets/user-workspace sub-catalog
-            elif not catalog_path or not catalog_path_with_slash.startswith(
-                f"user-datasets/{workspace}/"
-            ):
-                raise HTTPException(
-                    status_code=403,
-                    detail=f"Workspace {workspace} does not have access to {catalog_path if catalog_path else 'top-level'} catalog",
-                )
+        # Confirm user has access to parent catalog
+        # Retrive catalog to confirm owning workspace
+        if catalog_path:
+            parent_catalog = await self.database.find_catalog(catalog_path=catalog_path)
+            owner = parent_catalog["_sfapi_internal"]["owner"]
 
-        # Handle case where entry is not public but no username is provided, use catalog id instead
-        if workspace == "default_workspace" and not is_public:
-            # Should only be used to create top-level workspace catalogs e.g. user-datasets/<workspace-name>
-            catalog_path_list = catalog_path.split("/") if catalog_path else []
-            if len(catalog_path_list) > 1 and catalog_path_list[0] == "user-datasets":
-                username = catalog_path_list[1]
-            else:
-                # Assume username from catalog id itself
-                username = catalog["id"]
-        elif not is_public:
-            # Used for adding files to workspaces sub-catalogs
-            username = workspace
+            # If the ingester is attempting to create a private entry in a user workspace, this might need to be set public based on the parent catalog access control
+            if parent_catalog and not is_public and parent_catalog["_sfapi_internal"].get("rec_public", False):
+                is_public = True
+
         else:
-            # Used to add public data to catalogs
-            username = ""
+            owner = "default_workspace"
 
-        # Generate bitstring for entry
-        bitstring = "".join(create_bitstring(uid=username, is_public=is_public))
+        if owner != workspace:
+            if owner != "default_workspace":
+                raise HTTPException(
+                    status_code=403, detail="Workspace does not have access to this Catalog"
+                )
 
         catalog = self.database.catalog_serializer.stac_to_db(
             catalog=catalog, base_url=base_url
@@ -2176,7 +2018,10 @@ class TransactionsClient(AsyncBaseTransactionsClient):
             catalog_path=catalog_path, catalog=catalog, base_url=base_url
         )
         await self.database.create_catalog(
-            catalog_path=catalog_path, catalog=catalog, access_control=bitstring
+            catalog_path=catalog_path,
+            catalog=catalog,
+            owner=workspace,
+            is_public=is_public,
         )
 
         # This catalog does not yet have any collections or sub-catalogs
@@ -2211,26 +2056,23 @@ class TransactionsClient(AsyncBaseTransactionsClient):
         logger.info("Updating catalog")
         base_url = str(kwargs["request"].base_url)
 
+        # Check the owner of the specified catalog
+        old_catalog = await self.database.find_catalog(catalog_path=catalog_path)
+        annotations = old_catalog["_sfapi_internal"]
+        catalog_owner = annotations["owner"]
+
         # Confirm that the workspace provides correct access to the part of the catalogue to be altered
-        # check kubernetes manifest for given workspace to confirm access
-        # TODO: use Kubernetes API to confirm sub-catalog path access required for transaction
-        # For now, if this is a user workspace, confirm the changes are being made to the user's own workspace sub-catalog
-        # e.g. user-datasets/user-workspace/collection
-        if workspace != "default_workspace":
-            catalog_path_with_slash = f"{catalog_path}/" if catalog_path else ""
-            # This workspace can only write to the user-datasets/user-workspace sub-catalog
-            if not catalog_path or not catalog_path_with_slash.startswith(
-                f"user-datasets/{workspace}/"
-            ):
-                raise HTTPException(
-                    status_code=403,
-                    detail=f"Workspace {workspace} does not have access to {catalog_path if catalog_path else 'top-level'} catalog",
-                )
+        if workspace != catalog_owner:
+            raise HTTPException(
+                status_code=403,
+                detail=f"Workspace {workspace} does not have access to {catalog_path if catalog_path else 'top-level'} catalog",
+            )
 
         catalog = self.database.catalog_serializer.stac_to_db(
             catalog=catalog, base_url=base_url
         )
-        await self.database.update_catalog(catalog_path=catalog_path, catalog=catalog)
+        # Set owner and access_control to that of before
+        await self.database.update_catalog(catalog_path=catalog_path, catalog=catalog, annotations={"_sfapi_internal": annotations})
 
         # This catalog does not yet have any collections or sub-catalogs
         return CatalogSerializer.db_to_stac(
@@ -2258,21 +2100,15 @@ class TransactionsClient(AsyncBaseTransactionsClient):
         """
         logger.info("Deleting catalog")
 
-        # Confirm that the workspace provides correct access to the part of the catalogue to be altered
-        # check kubernetes manifest for given workspace to confirm access
-        # TODO: use Kubernetes API to confirm sub-catalog path access required for transaction
-        # For now, if this is a user workspace, confirm the changes are being made to the user's own workspace sub-catalog
-        # e.g. user-datasets/user-workspace/collection
-        if workspace != "default_workspace":
-            catalog_path_with_slash = f"{catalog_path}/" if catalog_path else ""
-            # This workspace can only write to the user-datasets/user-workspace sub-catalog
-            if not catalog_path or not catalog_path_with_slash.startswith(
-                f"user-datasets/{workspace}/"
-            ):
-                raise HTTPException(
-                    status_code=403,
-                    detail=f"Workspace {workspace} does not have access to {catalog_path if catalog_path else 'top-level'} catalog",
-                )
+        # Confirm user has access to this part of the catalog
+        # Retrive catalog to confirm owning workspace
+        catalog = await self.database.find_catalog(catalog_path=catalog_path)
+        owner = catalog["_sfapi_internal"]["owner"]
+
+        if owner != workspace:
+            raise HTTPException(
+                status_code=403, detail="Workspace does not have access to this Catalog"
+            )
 
         await self.database.delete_catalog(catalog_path=catalog_path)
         return None
@@ -2493,19 +2329,18 @@ class EsAsyncCollectionSearchClient(AsyncCollectionSearchClient):
 
             # Get access control array for each catalog
             try:
-                access_control = catalog["access_control"]
-                catalog.pop("access_control")
                 # Check access control
-                if not int(access_control[-1]):  # Catalog is private
-                    if username == "":
-                        raise HTTPException(
-                            status_code=401, detail="User is not authenticated"
-                        )
-                    elif not int(access_control[user_index]):
-                        raise HTTPException(
-                            status_code=403,
-                            detail="User does not have access to this catalog",
-                        )
+                if not catalog["_sfapi_internal"]["owner"] == username:
+                    if not catalog["_sfapi_internal"]["inf_public"]:  # Catalog is private
+                        if username == "":
+                            raise HTTPException(
+                                status_code=401, detail="User is not authenticated"
+                            )
+                        else:
+                            raise HTTPException(
+                                status_code=403,
+                                detail="User does not have access to this catalog",
+                            )
             except KeyError:
                 logger.error(f"Access control not found for catalog {catalog['id']}")
                 if username == "":
@@ -2546,46 +2381,17 @@ class EsAsyncCollectionSearchClient(AsyncCollectionSearchClient):
         if search_request.limit:
             limit = search_request.limit
 
-        collections = []
-
-        while True:
-            temp_collections, _, next_token, hit_tokens = (
-                await self.database.execute_collection_search(
-                    search=search,
-                    limit=limit,
-                    base_url=base_url,
-                    token=token,
-                    sort=sort,
-                    catalog_path=catalog_path,
-                )
+        collections, _, next_token = (
+            await self.database.execute_collection_search(
+                search=search,
+                limit=limit,
+                base_url=base_url,
+                token=token,
+                sort=sort,
+                username=username,
+                catalog_path=catalog_path,
             )
-
-            # Filter results to those that are accessible to the user
-            for i, (collection, hit_token) in enumerate(
-                zip(temp_collections, hit_tokens)
-            ):
-                # Get access control array for this collection
-                try:
-                    access_control = collection["access_control"]
-                    collection.pop("access_control")
-                    # Append collection to list if user has access
-                    if int(access_control[-1]) or int(access_control[user_index]):
-                        collections.append(collection)
-                        if len(collections) >= limit:
-                            if i < len(temp_collections) - 1:
-                                # Extract token from last result
-                                next_token = hit_token
-                                break
-                except KeyError:
-                    logger.error(
-                        f"Access control not found for collection {collection['id']}"
-                    )
-
-            # If collections now less than limit and more results, will need to run search again, giving next_token
-            if len(collections) >= limit or not next_token:
-                # TODO: implement smarter token logic to return token of last returned ES entry
-                break
-            token = next_token
+        )
 
         links = []
         if next_token:
@@ -2721,44 +2527,17 @@ class EsAsyncDiscoverySearchClient(AsyncDiscoverySearchClient):
 
         catalogs_and_collections = []
 
-        while True:
-            temp_catalogs_and_collections, _, next_token, hit_tokens = (
-                await self.database.execute_discovery_search(
-                    search=search,
-                    limit=limit,
-                    token=token,
-                    sort=None,  # use default sort for the minute
-                    base_url=base_url,
-                    conformance_classes=self.conformance_classes(),
-                )
+        catalogs_and_collections, _, next_token = (
+            await self.database.execute_discovery_search(
+                search=search,
+                limit=limit,
+                token=token,
+                sort=None,  # use default sort for the minute
+                username=username,
+                base_url=base_url,
+                conformance_classes=self.conformance_classes(),
             )
-
-            # Filter results to those that are accessible to the user
-            for i, (data, hit_token) in enumerate(
-                zip(temp_catalogs_and_collections, hit_tokens)
-            ):
-                # Get access control array for this collection
-                try:
-                    access_control = data["access_control"]
-                    data.pop("access_control")
-                    # Append collection to list if user has access
-                    if int(access_control[-1]) or int(access_control[user_index]):
-                        catalogs_and_collections.append(data)
-                        if len(catalogs_and_collections) >= limit:
-                            if i < len(temp_catalogs_and_collections) - 1:
-                                # Extract token from last result
-                                next_token = hit_token
-                                break
-                except KeyError:
-                    logger.error(
-                        f"No access control found for catalog or collection {data['id']}"
-                    )
-
-            # If catalogs_and_collections now less than limit and more results, will need to run search again, giving next_token
-            if len(catalogs_and_collections) >= limit or not next_token:
-                # TODO: implement smarter token logic to return token of last returned ES entry
-                break
-            token = next_token
+        )
 
         links = []
         if next_token:
