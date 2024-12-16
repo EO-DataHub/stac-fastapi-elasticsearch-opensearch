@@ -788,7 +788,7 @@ class DatabaseLogic:
 
             search_after = None
             if len(hits) > limit and limit < max_result_window:
-                if hits and (sort_array := hits[limit - 1].get("sort")):
+                if hits and (sort_array := hits[limit].get("sort")):
                     search_after = sort_array
             if not search_after:
                 token = None
@@ -900,10 +900,13 @@ class DatabaseLogic:
                 # Construct required catalog indices
                 try:
                     catalog_id = hit["_id"]
-                    catalog_index = hit["_index"].split("_", 1)[1]
-                    catalog_index_list = catalog_index.split(CATALOG_SEPARATOR)
-                    catalog_index_list.reverse()
-                    catalog_index_list.append(catalog_id)
+                    if hit["_index"] == ROOT_CATALOGS_INDEX:
+                        catalog_index_list = [catalog_id]
+                    else:
+                        catalog_index = hit["_index"].split("_", 1)[1]
+                        catalog_index_list = catalog_index.split(CATALOG_SEPARATOR)
+                        catalog_index_list.reverse()
+                        catalog_index_list.append(catalog_id)
                     if hit["_source"]["_sfapi_internal"]["owner"] == username or hit["_source"]["_sfapi_internal"]["inf_public"]:
                         catalog_indices_list.append(catalog_index_list)
                         allowed_hits.append(hit)
@@ -934,7 +937,7 @@ class DatabaseLogic:
 
             search_after = None
             if len(hits) > limit and limit < max_result_window:
-                if hits and (sort_array := hits[limit - 1].get("sort")):
+                if hits and (sort_array := hits[limit].get("sort")):
                     search_after = sort_array
             if not search_after:
                 token = None
@@ -987,7 +990,6 @@ class DatabaseLogic:
         child_data = list(zip(sub_catalogs_responses, collection_responses))
 
         catalogs = []
-        collections = []
         for i, hit in enumerate(allowed_hits):
             catalog_path = hit["_index"].split("_", 1)[1]
             catalog_path_list = catalog_path.split(CATALOG_SEPARATOR)
@@ -998,12 +1000,14 @@ class DatabaseLogic:
             sub_catalogs = []
             for sub_catalog in sub_data_catalogs_and_collections[0]:
                 if sub_catalog["_source"]:
-                    if hit["_source"]["_sfapi_internal"]["owner"] == username or hit["_source"]["_sfapi_internal"]["inf_public"]:
+                    if sub_catalog["_source"]["_sfapi_internal"]["owner"] == username or sub_catalog["_source"]["_sfapi_internal"]["inf_public"]:
                         sub_catalogs.append(sub_catalog["_source"])
             # Extract collections
+            collections = []
             for collection in sub_data_catalogs_and_collections[1]:
                 if collection["_source"]:
-                    if hit["_source"]["_sfapi_internal"]["owner"] == username or hit["_source"]["_sfapi_internal"]["inf_public"]:
+                    if collection["_source"]["_sfapi_internal"]["owner"] == username or collection["_source"]["_sfapi_internal"]["inf_public"]:
+                        print(collection["_source"])
                         collections.append(collection["_source"])
             catalogs.append(
                 self.catalog_serializer.db_to_stac(
@@ -1052,10 +1056,12 @@ class DatabaseLogic:
         # Get all catalogs in this index
         query = {"query": {"match_all": {}}}
         try:
+            logger.error("index is", index_param)
             response = await self.client.search(
                 index=index_param, body=query, size=NUMBER_OF_CATALOG_COLLECTIONS
             )
             hits = response["hits"]["hits"]
+            logger.error(len(hits))
 
             catalogs = [hit["_source"] for hit in hits]
         except exceptions.NotFoundError:
@@ -1594,7 +1600,7 @@ class DatabaseLogic:
 
             search_after = None
             if len(hits) > limit and limit < max_result_window:
-                if hits and (sort_array := hits[limit - 1].get("sort")):
+                if hits and (sort_array := hits[limit].get("sort")):
                     search_after = sort_array
             if not search_after:
                 token = None
@@ -1723,7 +1729,7 @@ class DatabaseLogic:
 
             search_after = None
             if len(hits) > limit and limit < max_result_window:
-                if hits and (sort_array := hits[limit - 1].get("sort")):
+                if hits and (sort_array := hits[limit].get("sort")):
                     search_after = sort_array
             if not search_after:
                 token = None
@@ -3351,7 +3357,7 @@ class DatabaseLogic:
             
             search_after = None
             if len(hits) > limit and limit < max_result_window:
-                if hits and (sort_array := hits[limit - 1].get("sort")):
+                if hits and (sort_array := hits[limit].get("sort")):
                     search_after = sort_array
             if not search_after:
                 token = None
