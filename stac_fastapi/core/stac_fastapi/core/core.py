@@ -441,7 +441,7 @@ class CoreClient(AsyncBaseCoreClient):
         )
 
         if catalog_path:
-            catalog_url = f"catalogs/{catalog_path}"
+            catalog_url = f"catalogs/{catalog_path}/"
         else:
             catalog_url = ""
 
@@ -2407,7 +2407,7 @@ class EsAsyncCollectionSearchClient(AsyncCollectionSearchClient):
         )
 
         if catalog_path:
-            catalog_url = f"catalogs/{catalog_path}"
+            catalog_url = f"catalogs/{catalog_path}/"
         else:
             catalog_url = ""
 
