@@ -719,7 +719,7 @@ class DatabaseLogic:
     """CORE LOGIC"""
 
     async def get_all_collections(
-        self, token: Optional[str], limit: int, base_url: str, username: str
+        self, token: Optional[str], limit: int, base_url: str, workspaces: list
     ) -> Tuple[List[Dict[str, Any]], Optional[str]]:
         """Retrieve a list of all collections from Elasticsearch, supporting pagination.
         This goes across all catalogs and top-level catalogs.
@@ -766,7 +766,7 @@ class DatabaseLogic:
                 catalog_path_list = catalog_path.split(CATALOG_SEPARATOR)
                 catalog_path_list.reverse()
                 catalog_path = "/".join(catalog_path_list)
-                if hit["_source"]["_sfapi_internal"]["owner"] == username or hit["_source"]["_sfapi_internal"]["inf_public"]:
+                if  hit["_source"]["_sfapi_internal"]["inf_public"] or hit["_source"]["_sfapi_internal"]["owner"] in workspaces:
                     collections.append(
                         self.collection_serializer.db_to_stac(
                             collection=hit["_source"],
@@ -797,7 +797,7 @@ class DatabaseLogic:
         return collections, token
 
     async def get_catalog_collections(
-        self, catalog_path: str, token: Optional[str], limit: int, base_url: str, user_index: int
+        self, catalog_path: str, token: Optional[str], limit: int, base_url: str
     ) -> Tuple[List[Dict[str, Any]], Optional[str]]:
         """Retrieve a list of up to 10,000 collections in a catalog from Elasticsearch. 
         To retrieve paginated results, use get_all_collections instead.
@@ -839,7 +839,7 @@ class DatabaseLogic:
         token: Optional[str],
         limit: Optional[int],
         base_url: str,
-        username: str,
+        workspaces: list,
         catalog_path: Optional[str] = None,
         conformance_classes: list = [],
     ) -> Tuple[List[Dict[str, Any]], Optional[str]]:
@@ -904,7 +904,7 @@ class DatabaseLogic:
                     catalog_index_list = catalog_index.split(CATALOG_SEPARATOR)
                     catalog_index_list.reverse()
                     catalog_index_list.append(catalog_id)
-                    if hit["_source"]["_sfapi_internal"]["owner"] == username or hit["_source"]["_sfapi_internal"]["inf_public"]:
+                    if hit["_source"]["_sfapi_internal"]["inf_public"] or hit["_source"]["_sfapi_internal"]["owner"] in workspaces :
                         catalog_indices_list.append(catalog_index_list)
                         allowed_hits.append(hit)
                         if len(allowed_hits) == limit:
@@ -917,7 +917,7 @@ class DatabaseLogic:
                             break
                 except IndexError:
                     catalog_index_list = [catalog_id]
-                    if hit["_source"]["_sfapi_internal"]["owner"] == username or hit["_source"]["_sfapi_internal"]["inf_public"]:
+                    if hit["_source"]["_sfapi_internal"]["inf_public"] or hit["_source"]["_sfapi_internal"]["owner"] == workspaces :
                         catalog_indices_list.append(catalog_index_list)
                         allowed_hits.append(hit)
                         if len(allowed_hits) == limit:
@@ -1487,7 +1487,7 @@ class DatabaseLogic:
         sort: Optional[Dict[str, Dict[str, str]]],
         catalog_paths: Optional[List[str]],
         collection_ids: Optional[List[str]],
-        username: str,
+        workspaces: list,
         ignore_unavailable: bool = True,
     ) -> Tuple[Iterable[Dict[str, Any]], Optional[int], Optional[str]]:
         """Execute a search query with limit and other optional parameters.
@@ -1578,7 +1578,7 @@ class DatabaseLogic:
                     catalog_path=item_catalog_path,
                     collection_id=hit["_source"]["collection"],
                 )
-                if collection["_sfapi_internal"]["owner"] == username or collection["_sfapi_internal"]["inf_public"]:
+                if collection["_sfapi_internal"]["inf_public"] or collection["_sfapi_internal"]["owner"] in workspaces:
                     items_and_cat_paths.append((hit["_source"], item_catalog_path))
                     if len(items_and_cat_paths) == limit:
                         token = None
@@ -1623,7 +1623,7 @@ class DatabaseLogic:
         base_url: str,
         token: Optional[str],
         sort: Optional[Dict[str, Dict[str, str]]],
-        username: str,
+        workspaces: list,
         catalog_path: str = None,
         ignore_unavailable: bool = True,
     ) -> Tuple[Iterable[Dict[str, Any]], Optional[int], Optional[str]]:
@@ -1697,7 +1697,7 @@ class DatabaseLogic:
 
             hits = es_response["hits"]["hits"]
             for i, hit in enumerate(hits):
-                if hit["_source"]["_sfapi_internal"]["owner"] == username or hit["_source"]["_sfapi_internal"]["inf_public"]:
+                if hit["_source"]["_sfapi_internal"]["inf_public"] or hit["_source"]["_sfapi_internal"]["owner"] in workspaces :
                     catalog_path = hit["_index"].split("_", 1)[1]
                     catalog_path_list = catalog_path.split(CATALOG_SEPARATOR)
                     catalog_path_list.reverse()
@@ -3258,7 +3258,7 @@ class DatabaseLogic:
         base_url: str,
         token: Optional[str],
         sort: Optional[Dict[str, Dict[str, str]]],
-        username: str,
+        workspaces: list,
         ignore_unavailable: bool = True,
         conformance_classes: list = [],
     ) -> Tuple[Iterable[Dict[str, Any]], Optional[int], Optional[str]]:
@@ -3324,7 +3324,7 @@ class DatabaseLogic:
             hits = es_response["hits"]["hits"]
 
             for hit in hits:
-                if hit["_source"]["_sfapi_internal"]["owner"] == username or hit["_source"]["_sfapi_internal"]["inf_public"]:
+                if hit["_source"]["_sfapi_internal"]["inf_public"] or hit["_source"]["_sfapi_internal"]["owner"] in workspaces:
                     if hit["_source"]["type"] == "Catalog":
                         catalog_hits.append(hit)
                         # Calculate catalog path for found catalog
