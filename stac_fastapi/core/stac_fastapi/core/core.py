@@ -282,8 +282,6 @@ class CoreClient(AsyncBaseCoreClient):
         logger.info("Getting landing page")
         request: Request = kwargs["request"]
         base_url = get_base_url(request)
-        workspaces = headers.get("X-Workspaces", "")
-        print(f"workspaces: {workspaces}")  
         landing_page = self._landing_page(
             base_url=f"{base_url}catalogs/{catalog_path}/",
             conformance_classes=self.conformance_classes(),
