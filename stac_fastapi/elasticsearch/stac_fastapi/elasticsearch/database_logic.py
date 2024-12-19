@@ -917,7 +917,7 @@ class DatabaseLogic:
                             break
                 except IndexError:
                     catalog_index_list = [catalog_id]
-                    if hit["_source"]["_sfapi_internal"]["inf_public"] or hit["_source"]["_sfapi_internal"]["owner"] == workspaces :
+                    if hit["_source"]["_sfapi_internal"]["inf_public"] or hit["_source"]["_sfapi_internal"]["owner"] in workspaces :
                         catalog_indices_list.append(catalog_index_list)
                         allowed_hits.append(hit)
                         if len(allowed_hits) == limit:
@@ -998,12 +998,12 @@ class DatabaseLogic:
             sub_catalogs = []
             for sub_catalog in sub_data_catalogs_and_collections[0]:
                 if sub_catalog["_source"]:
-                    if hit["_source"]["_sfapi_internal"]["owner"] == username or hit["_source"]["_sfapi_internal"]["inf_public"]:
+                    if hit["_source"]["_sfapi_internal"]["inf_public"] or hit["_source"]["_sfapi_internal"]["owner"] in workspaces:
                         sub_catalogs.append(sub_catalog["_source"])
             # Extract collections
             for collection in sub_data_catalogs_and_collections[1]:
                 if collection["_source"]:
-                    if hit["_source"]["_sfapi_internal"]["owner"] == username or hit["_source"]["_sfapi_internal"]["inf_public"]:
+                    if hit["_source"]["_sfapi_internal"]["inf_public"] or hit["_source"]["_sfapi_internal"]["owner"] in workspaces:
                         collections.append(collection["_source"])
             catalogs.append(
                 self.catalog_serializer.db_to_stac(
