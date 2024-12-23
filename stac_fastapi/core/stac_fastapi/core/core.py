@@ -125,11 +125,11 @@ class CoreClient(AsyncBaseCoreClient):
     description: str = attr.ib(default="stac-fastapi")
 
 
-    def filter_by_access(self, username: str, data: list):
+    def filter_by_access(self, workspaces: list, data: list):
         output_data = []
         for d in data:
             try:
-                if d["_sfapi_internal"]["inf_public"] or d["_sfapi_internal"]["owner"] == username:
+                if d["_sfapi_internal"]["inf_public"] or d["_sfapi_internal"]["owner"] in workspaces:
                     output_data.append(d)
             except KeyError:
                 logger.error(f"No access control found for catalog {d['id']}")
@@ -193,14 +193,14 @@ class CoreClient(AsyncBaseCoreClient):
         return landing_page
 
     async def root_landing_page(
-        self, username_header: dict, catalog_path: Optional[str] = None, **kwargs
+        self, headers: dict, catalog_path: Optional[str] = None, **kwargs
     ) -> stac_types.LandingPage:
         """Landing page.
 
         Called with `GET /`.
 
         Args:
-            username_header (dict): X-Username header from the request.
+            headers (dict): X-Workspaces header from the request.
             catalog_path (str):
             **kwargs: Keyword arguments from the request.
 
@@ -217,17 +217,16 @@ class CoreClient(AsyncBaseCoreClient):
         )
 
         # Check if current user has access to each Catalog
-        # Extract X-Username header from username_header
-        username = username_header.get("X-Username", "")
-
+        # Extract X-Workspaces header from headers)
+        workspaces = headers.get("X-Workspaces", "")
+        logger.info(f"workspaces: {workspaces}")
         # Get user index
-        user_index = hash_to_index(username)
 
         catalogs = []
 
         temp_catalogs = await self.database.get_catalog_subcatalogs(base_url=base_url)
 
-        catalogs = self.filter_by_access(username, temp_catalogs)
+        catalogs = self.filter_by_access(workspaces, temp_catalogs)
 
         for catalog in catalogs:
             landing_page["links"].append(
@@ -266,14 +265,14 @@ class CoreClient(AsyncBaseCoreClient):
         return landing_page
 
     async def landing_page(
-        self, username_header: dict, catalog_path: Optional[str] = None, **kwargs
+        self, headers: dict, catalog_path: Optional[str] = None, **kwargs
     ) -> stac_types.LandingPage:
         """Landing page.
 
         Called with `GET /`.
 
         Args:
-            username_header (dict): X-Username header from the request.
+            headers (dict): X-Workspaces header from the request.
             catalog_path (str): The path to the catalog for this landing page.
             **kwargs: Keyword arguments from the request.
 
@@ -289,7 +288,7 @@ class CoreClient(AsyncBaseCoreClient):
             extension_schemas=[],
         )
 
-        catalog = await self.get_catalog(username_header, catalog_path, request=request)
+        catalog = await self.get_catalog(headers, catalog_path, request=request)
         landing_page.update(
             {
                 "id": catalog["id"],
@@ -335,11 +334,11 @@ class CoreClient(AsyncBaseCoreClient):
 
         return landing_page
 
-    async def all_collections(self, username_header: dict, **kwargs) -> Collections:
+    async def all_collections(self, headers: dict, **kwargs) -> Collections:
         """Read all collections from the database.
 
         Args:
-            username_header (dict): X-Username header from the request.
+            headers (dict): X-Workspaces header from the request.
             **kwargs: Keyword arguments from the request.
 
         Returns:
@@ -352,17 +351,16 @@ class CoreClient(AsyncBaseCoreClient):
         token = request.query_params.get("token")
 
         # Check if current user has access to each Catalog
-        # Extract X-Username header from username_header
-        username = username_header.get("X-Username", "")
-
+        # Extract X-Workspaces header from headers
+        workspaces = headers.get("X-Workspaces", "")
         # Get user index
-        user_index = hash_to_index(username)
+        # user_index = hash_to_index(username)
 
         collections = []
 
         collections, next_token = (
             await self.database.get_all_collections(
-                token=token, limit=limit, base_url=base_url, username=username
+                token=token, limit=limit, base_url=base_url, workspaces=workspaces
             )
         )
 
@@ -383,12 +381,12 @@ class CoreClient(AsyncBaseCoreClient):
         return Collections(collections=collections, links=links)
 
     async def all_catalogs(
-        self, username_header: dict, catalog_path: Optional[str] = None, **kwargs
+        self, headers: dict, catalog_path: Optional[str] = None, **kwargs
     ) -> Catalogs:
         """Read all catalogs from the database.
 
         Args:
-            username_header (dict): X-Username header from the request.
+            headers (dict): X-Workspaces header from the request.
             **kwargs: Keyword arguments from the request.
 
         Returns:
@@ -400,12 +398,9 @@ class CoreClient(AsyncBaseCoreClient):
         limit = int(request.query_params.get("limit", 10))
         token = request.query_params.get("token")
 
-        # Extract X-Username header from username_header
-        username = username_header.get("X-Username", "")
-
-        # Get user index
-        user_index = hash_to_index(username)
-
+        # Extract X-Workspaces header from headers
+        workspaces = headers.get("X-Workspaces", "")
+        authorization = headers.get("X-Authorized", "")
         if catalog_path:
             # Check if current user has access to each Catalog
             catalog = await self.database.find_catalog(catalog_path=catalog_path)
@@ -413,9 +408,9 @@ class CoreClient(AsyncBaseCoreClient):
             # Get access control array for each catalog
             try:
                 # Check access control
-                if not catalog["_sfapi_internal"]["owner"] == username:
+                if not catalog["_sfapi_internal"]["owner"] in workspaces:
                     if not catalog["_sfapi_internal"]["inf_public"]:  # Catalog is private
-                        if username == "":  # User is not logged in
+                        if authorization == "unauthorized":  # User is not logged in
                             raise HTTPException(
                                 status_code=401, detail="User is not authenticated"
                             )
@@ -435,7 +430,7 @@ class CoreClient(AsyncBaseCoreClient):
                 token=token,
                 limit=limit,
                 base_url=base_url,
-                username=username,
+                workspaces=workspaces,
                 conformance_classes=self.conformance_classes(),
             )
         )
@@ -470,12 +465,12 @@ class CoreClient(AsyncBaseCoreClient):
         return Catalogs(catalogs=catalogs, links=links)
 
     async def get_collection(
-        self, username_header: dict, catalog_path: str, collection_id: str, **kwargs
+        self, headers: dict, catalog_path: str, collection_id: str, **kwargs
     ) -> Collection:
         """Get a collection from the database by its id.
 
         Args:
-            username_header (dict): X-Username header from the request.
+            headers (dict): X-Workspaces header from the request.
             catalog_path (str): The path to the catalog the collection belongs to.
             collection_id (str): The id of the collection to retrieve.
             kwargs: Additional keyword arguments passed to the API call.
@@ -494,17 +489,15 @@ class CoreClient(AsyncBaseCoreClient):
         )
 
         # Check if current user has access to this Collection
-        # Extract X-Username header from username_header
-        username = username_header.get("X-Username", "")
-
-        # Get user index
-        user_index = hash_to_index(username)
+        # Extract X-Workspaces header from headers
+        workspaces = headers.get("X-Workspaces", "")
+        authorization = headers.get("X-Authorized", "")
         # Get access control array for each collection
         try:
             # Check access control
-            if not collection["_sfapi_internal"]["owner"] == username:
+            if not collection["_sfapi_internal"]["owner"] in workspaces:
                 if not collection["_sfapi_internal"]["inf_public"]:  # Collection is private
-                    if username == "":  # User is not logged in
+                    if authorization == "unauthorized":  # User is not logged in
                         raise HTTPException(
                             status_code=401, detail="User is not authenticated"
                         )
@@ -515,7 +508,7 @@ class CoreClient(AsyncBaseCoreClient):
                         )
         except KeyError:
             logger.error(f"No access control found for collection {collection['id']}")
-            if username == "":  # User is not logged in
+            if authorization == "unauthorized":  # User is not logged in
                 raise HTTPException(status_code=401, detail="User is not authenticated")
             else:  # User is logged in but still can't determine access
                 raise HTTPException(
@@ -528,12 +521,12 @@ class CoreClient(AsyncBaseCoreClient):
         )
 
     async def get_catalog(
-        self, username_header: dict, catalog_path: str, **kwargs
+        self, headers: dict, catalog_path: str, **kwargs
     ) -> Catalog:
         """Get a catalog from the database by its id.
 
         Args:
-            username_header (dict): X-Username header from the request.
+            headers (dict): X-Workspaces header from the request.
             catalog_path (str): The path to the catalog to retrieve.
             kwargs: Additional keyword arguments passed to the API call.
 
@@ -555,17 +548,17 @@ class CoreClient(AsyncBaseCoreClient):
         catalog = await self.database.find_catalog(catalog_path=catalog_path)
 
         # Check if current user has access to this Catalog
-        # Extract X-Username header from username_header
-        username = username_header.get("X-Username", "")
-
+        # Extract X-Workspaces header from headers
+        workspaces = headers.get("X-Workspaces", "")
+        authorization = headers.get("X-Authorized", "")
         # Get user index
-        user_index = hash_to_index(username)
+        # user_index = hash_to_index(username)
         # Get access control array for each catalog
         try:
             # Check access control
-            if not catalog["_sfapi_internal"]["owner"] == username:
+            if not catalog["_sfapi_internal"]["owner"] in workspaces:
                 if not catalog["_sfapi_internal"]["inf_public"]:  # Catalog is private
-                    if username == "":  # User is not logged in
+                    if authorization == "unauthorized":  # User is not logged in
                         raise HTTPException(
                             status_code=401, detail="User is not authenticated"
                         )
@@ -576,7 +569,7 @@ class CoreClient(AsyncBaseCoreClient):
                         )
         except KeyError:
             logger.error(f"No access control found for catalog {catalog['id']}")
-            if username == "":  # User is not logged in
+            if authorization == "unauthorized":  # User is not logged in
                 raise HTTPException(status_code=401, detail="User is not authenticated")
             else:  # User is logged in but still can't determine access
                 raise HTTPException(
@@ -588,12 +581,11 @@ class CoreClient(AsyncBaseCoreClient):
             catalog_path=catalog_path,
             base_url=base_url,
             limit=NUMBER_OF_CATALOG_COLLECTIONS,
-            token=None,
-            user_index=user_index,
+            token=None
         )
 
         # Check if current user has access to each collection
-        collections = self.filter_by_access(username, temp_collections)
+        collections = self.filter_by_access(workspaces, temp_collections)
 
         temp_sub_catalogs = await self.database.get_catalog_subcatalogs(
             catalog_path=catalog_path,
@@ -601,7 +593,7 @@ class CoreClient(AsyncBaseCoreClient):
         )
 
         # Check if current user has access to each collection
-        sub_catalogs = self.filter_by_access(username, temp_sub_catalogs)
+        sub_catalogs = self.filter_by_access(workspaces, temp_sub_catalogs)
 
         return self.catalog_serializer.db_to_stac(
             catalog_path=parent_catalog_path,
@@ -614,7 +606,7 @@ class CoreClient(AsyncBaseCoreClient):
 
     async def item_collection(
         self,
-        username_header: dict,
+        headers: dict,
         catalog_path: str,
         collection_id: str,
         bbox: Optional[List[NumType]] = None,
@@ -626,7 +618,7 @@ class CoreClient(AsyncBaseCoreClient):
         """Read items from a specific collection in the database.
 
         Args:
-            username_header (dict): X-Username header from the request.
+            headers (dict): X-Workspaces header from the request.
             catalog_path (str): The path to the catalog to read items from.
             collection_id (str): The identifier of the collection to read items from.
             bbox (Optional[List[NumType]]): The bounding box to filter items by.
@@ -652,18 +644,18 @@ class CoreClient(AsyncBaseCoreClient):
         )
 
         # Check if current user has access to this Collection
-        # Extract X-Username header from username_header
-        username = username_header.get("X-Username", "")
-
+        # Extract X-Workspaces header from headers
+        workspaces = headers.get("X-Workspaces", "")
+        authorization = headers.get("X-Authorized", "")
         # Get user index
-        user_index = hash_to_index(username)
+        # user_index = hash_to_index(username)
 
         # Get access control array for the collection
         try:
             # Check access control
-            if not collection["_sfapi_internal"]["owner"] == username:
+            if not collection["_sfapi_internal"]["owner"] in workspaces:
                 if not collection["_sfapi_internal"]["inf_public"]:  # Collection is private
-                    if username == "":  # User is not logged in
+                    if authorization == "unauthorized":  # User is not logged in
                         raise HTTPException(
                             status_code=401, detail="User is not authenticated"
                         )
@@ -674,7 +666,7 @@ class CoreClient(AsyncBaseCoreClient):
                         )
         except KeyError:
             logger.error(f"No access control found for collection {collection['id']}")
-            if username == "":  # User is not logged in
+            if authorization == "unauthorized":  # User is not logged in
                 raise HTTPException(status_code=401, detail="User is not authenticated")
             else:  # User is logged in but still can't determine access
                 raise HTTPException(
@@ -709,7 +701,7 @@ class CoreClient(AsyncBaseCoreClient):
             limit=limit,
             sort=None,
             token=token,  # type: ignore
-            username=username,
+            workspaces=workspaces,
             collection_ids=[collection_id],
         )
 
@@ -744,7 +736,7 @@ class CoreClient(AsyncBaseCoreClient):
 
     async def get_item(
         self,
-        username_header: dict,
+        headers: dict,
         item_id: str,
         collection_id: str,
         catalog_path: str,
@@ -753,7 +745,7 @@ class CoreClient(AsyncBaseCoreClient):
         """Get an item from the database based on its id and collection id.
 
         Args:
-            username_header (dict): X-Username header from the request.
+            headers (dict): X-Workspaces header from the request.
             item_id (str): The ID of the item to be retrieved.
             collection_id (str): The ID of the collection the item belongs to.
             catalog_path (str): The path to the catalog the collection and item belongs to.
@@ -775,17 +767,15 @@ class CoreClient(AsyncBaseCoreClient):
         )
 
         # Check if current user has access to this item
-        # Extract X-Username header from username_header
-        username = username_header.get("X-Username", "")
-
-        # Get user index
-        user_index = hash_to_index(username)
+        # Extract X-Workspaces header from headers
+        workspaces = headers.get("X-Workspaces", "")
+        authorization = headers.get("X-Authorized", "")
         # Get access control array for each collection
         try:
             # Check access control
-            if not collection["_sfapi_internal"]["owner"] == username:
+            if not collection["_sfapi_internal"]["owner"] in workspaces:
                 if not collection["_sfapi_internal"]["inf_public"]:  # Collection is private
-                    if username == "":  # User is not logged in
+                    if authorization == "unauthorized":  # User is not logged in
                         raise HTTPException(
                             status_code=401, detail="User is not authenticated"
                         )
@@ -796,7 +786,7 @@ class CoreClient(AsyncBaseCoreClient):
                         )
         except KeyError:
             logger.error(f"No access control found for collection {collection['id']}")
-            if username == "":  # User is not logged in
+            if authorization == "unauthorized":  # User is not logged in
                 raise HTTPException(status_code=401, detail="User is not authenticated")
             else:  # User is logged in but still can't determine access
                 raise HTTPException(
@@ -854,7 +844,7 @@ class CoreClient(AsyncBaseCoreClient):
     async def get_global_search(
         self,
         request: Request,
-        username_header: dict,
+        headers: dict,
         collections: Optional[List[str]] = None,
         catalog_paths: Optional[List[str]] = None,
         ids: Optional[List[str]] = None,
@@ -874,7 +864,7 @@ class CoreClient(AsyncBaseCoreClient):
 
         Args:
             request (Request): The incoming request.
-            username_header (dict): X-Username header from the request.
+            headers (dict): X-Workspaces header from the request.
             collections (Optional[List[str]]): List of collection IDs to search in.
             catalog_paths (Optional[List[str]]): List of catalog paths to search in.
             ids (Optional[List[str]]): List of item IDs to search for.
@@ -960,7 +950,7 @@ class CoreClient(AsyncBaseCoreClient):
         resp = await self.post_global_search(
             search_request=search_request,
             request=request,
-            username_header=username_header,
+            headers=headers,
         )
 
         return resp
@@ -969,7 +959,7 @@ class CoreClient(AsyncBaseCoreClient):
         self,
         search_request: BaseSearchPostRequest,
         request: Request,
-        username_header: dict,
+        headers: dict,
     ) -> ItemCollection:
         """
         Perform a POST search on the catalog.
@@ -977,7 +967,7 @@ class CoreClient(AsyncBaseCoreClient):
         Args:
             search_request (BaseSearchPostRequest): Request object that includes the parameters for the search.
             request (Request): The incoming request.
-            username_header (dict): X-Username header from the request.
+            headers (dict): X-Workspaces header from the request.
 
         Returns:
             ItemCollection: A collection of items matching the search criteria.
@@ -1070,11 +1060,9 @@ class CoreClient(AsyncBaseCoreClient):
         if search_request.token:
             token = search_request.token
 
-        # Extract X-Username header from username_header
-        username = username_header.get("X-Username", "")
+        # Extract X-Workspaces header from headers
+        workspaces = headers.get("X-Workspaces", "")
 
-        # Get user index
-        user_index = hash_to_index(username)
 
         # Filter the search catalogs to those that are accessible to the user
         for catalog_path in search_request.catalog_paths[:]:
@@ -1082,7 +1070,7 @@ class CoreClient(AsyncBaseCoreClient):
             # Get access control array for each catalog
             try:
                 # Remove catalog from list if user does not have access
-                if not catalog["_sfapi_internal"]["owner"] == username and not catalog["_sfapi_internal"]["inf_public"]:
+                if not catalog["_sfapi_internal"]["inf_public"] and not catalog["_sfapi_internal"]["owner"] == workspaces:
                     search_request.catalog_paths.remove(catalog_path)
             except KeyError:
                 logger.error(f"No access control found for catalog {catalog['id']}")
@@ -1098,7 +1086,7 @@ class CoreClient(AsyncBaseCoreClient):
                 # Get access control array for each collection
                 try:
                     # Remove catalog from list if user does not have access
-                    if not collection["_sfapi_internal"]["owner"] == username and not collection["_sfapi_internal"]["inf_public"]:
+                    if not collection["_sfapi_internal"]["inf_public"] and not collection["_sfapi_internal"]["owner"] in workspaces:
                         search_request.collections.remove(collection_id)
                 except KeyError:
                     logger.error(
@@ -1130,7 +1118,7 @@ class CoreClient(AsyncBaseCoreClient):
                 limit=limit,
                 token=token,  # type: ignore
                 sort=sort,
-                username=username,
+                workspaces=workspaces,
                 collection_ids=search_request.collections,
                 catalog_paths=search_request.catalog_paths,
             )
@@ -1190,7 +1178,7 @@ class CoreClient(AsyncBaseCoreClient):
     async def get_search(
         self,
         request: Request,
-        username_header: dict,
+        headers: dict,
         catalog_path: Optional[str],
         collections: Optional[List[str]] = None,
         ids: Optional[List[str]] = None,
@@ -1210,7 +1198,7 @@ class CoreClient(AsyncBaseCoreClient):
 
         Args:
             request (Request): The incoming request.
-            username_header (dict): X-Username header from the request.
+            headers (dict): X-Workspaces header from the request.
             catalog_path (Optional[[str]): Path to catalog to search in.
             collections (Optional[List[str]]): List of collection IDs to search in.
             ids (Optional[List[str]]): List of item IDs to search for.
@@ -1294,7 +1282,7 @@ class CoreClient(AsyncBaseCoreClient):
             catalog_path=catalog_path,
             search_request=search_request,
             request=request,
-            username_header=username_header,
+            headers=headers,
         )
 
         return resp
@@ -1304,7 +1292,7 @@ class CoreClient(AsyncBaseCoreClient):
         catalog_path: Optional[str],
         search_request: BaseCatalogSearchPostRequest,
         request: Request,
-        username_header: dict,
+        headers: dict,
         **kwargs,
     ) -> ItemCollection:
         """
@@ -1314,7 +1302,7 @@ class CoreClient(AsyncBaseCoreClient):
             catalog_path (Optional[str]): Path to catalog to search in.
             search_request (BaseCatalogSearchPostRequest): Request object that includes the parameters for the search.
             request (Request): The incoming request.
-            username_header (dict): X-Username header from the request.
+            headers (dict): X-Workspaces header from the request.
             **kwargs: Keyword arguments passed to the function.
 
         Returns:
@@ -1327,20 +1315,18 @@ class CoreClient(AsyncBaseCoreClient):
         base_url = str(request.base_url)
 
         # Check catalog is accessible to the user
-        # Extract X-Username header from username_header
-        username = username_header.get("X-Username", "")
-
-        # Get user index
-        user_index = hash_to_index(username)
+        # Extract X-Workspaces header from headers
+        workspaces = headers.get("X-Workspaces", "")
+        authorization = headers.get("X-Authorized", "")
 
         # Filter the search catalogs to those that are accessible to the user
         catalog = await self.database.find_catalog(catalog_path=catalog_path)
         # Get access control array for each catalog
         try:
             # Check access control
-            if not catalog["_sfapi_internal"]["owner"] == username:
+            if not catalog["_sfapi_internal"]["owner"] in workspaces:
                 if not catalog["_sfapi_internal"]["inf_public"]:  # Collection is private
-                    if username == "":  # User is not logged in
+                    if authorization == "unauthorized":  # User is not logged in
                         raise HTTPException(
                             status_code=401, detail="User is not authenticated"
                         )
@@ -1351,7 +1337,7 @@ class CoreClient(AsyncBaseCoreClient):
                         )
         except KeyError:
             logger.error(f"No access control found for catalog {catalog['id']}")
-            if username == "":  # User is not logged in
+            if authorization == "unauthorized":  # User is not logged in
                 raise HTTPException(status_code=401, detail="User is not authenticated")
             else:  # User is logged in but still can't determine access
                 raise HTTPException(
@@ -1371,7 +1357,7 @@ class CoreClient(AsyncBaseCoreClient):
             # Get access control array for each collection
             try:
                 # Remove catalog from list if user does not have access
-                if not collection["_sfapi_internal"]["owner"] == username and not collection["_sfapi_internal"]["inf_public"]:
+                if not collection["_sfapi_internal"]["inf_public"] and not collection["_sfapi_internal"]["owner"] in workspaces :
                     collections.remove(collection_id)
             except KeyError:
                 logger.error(
@@ -1449,7 +1435,7 @@ class CoreClient(AsyncBaseCoreClient):
                 sort=sort,
                 collection_ids=collections,
                 catalog_paths=[catalog_path],
-                username=username,
+                workspaces=workspaces,
             )
         )
 
@@ -1529,7 +1515,7 @@ class TransactionsClient(AsyncBaseTransactionsClient):
             catalog_path (str): The path to the catalog containing the parent collection.
             collection_id (str): The id of the collection to add the item to.
             item (stac_types.Item): The item to be added to the collection.
-            username_header (dict): X-Username header from the request.
+            headers (dict): X-Workspaces header from the request.
             workspace (str): The workspace being used to create the item.
             **kwargs: Additional keyword arguments.
 
@@ -1709,7 +1695,7 @@ class TransactionsClient(AsyncBaseTransactionsClient):
         Args:
             catalog_path (str): The path to the catalog containing the collection.
             collection (stac_types.Collection): The collection to be created.
-            username_header (dict): X-Username header from the request.
+            headers (dict): X-Workspaces header from the request.
             workspace (str): The workspace being used to create the collection.
             is_public (bool): Whether the collection is public or not.
             **kwargs: Additional keyword arguments.
@@ -2299,7 +2285,7 @@ class EsAsyncCollectionSearchClient(AsyncCollectionSearchClient):
         self,
         search_request: BaseCollectionSearchPostRequest,
         request: Request,
-        username_header: dict,
+        headers: dict,
         catalog_path: str = None,
         **kwargs,
     ) -> Collections:
@@ -2309,7 +2295,7 @@ class EsAsyncCollectionSearchClient(AsyncCollectionSearchClient):
         Args:
             search_request (BaseCollectionSearchPostRequest): Request object that includes the parameters for the search.
             request (Request): The incoming request.
-            username_header (dict): X-Username header from the request.
+            headers (dict): X-Workspaces header from the request.
             catalog_path (Str): The path to the catalog in which to search the collections.
             **kwargs: Keyword arguments passed to the function.
 
@@ -2324,28 +2310,23 @@ class EsAsyncCollectionSearchClient(AsyncCollectionSearchClient):
         token = request.query_params.get("token")
         limit = int(request.query_params.get("limit", 10))
 
-        # Extract X-Username header from username_header for access control
-        username = username_header.get("X-Username", "")
-
-        # Get user index
-        user_index = hash_to_index(username)
+        # Extract X-Workspaces header from headers for access control
+        workspaces = headers.get("X-Workspaces", "")
+        authorization = headers.get("X-Authorized", "")
 
         if catalog_path:
             # Get Catalog to confirm user access
             catalog = await self.database.find_catalog(catalog_path=catalog_path)
 
-            # Extract X-Username header from username_header for access control
-            username = username_header.get("X-Username", "")
-
-            # Get user index
-            user_index = hash_to_index(username)
+            # Extract X-Workspaces header from headers for access control
+            workspaces = headers.get("X-Workspaces", "")
 
             # Get access control array for each catalog
             try:
                 # Check access control
-                if not catalog["_sfapi_internal"]["owner"] == username:
+                if not catalog["_sfapi_internal"]["owner"] in workspaces:
                     if not catalog["_sfapi_internal"]["inf_public"]:  # Catalog is private
-                        if username == "":
+                        if authorization == "unauthorized":
                             raise HTTPException(
                                 status_code=401, detail="User is not authenticated"
                             )
@@ -2356,7 +2337,7 @@ class EsAsyncCollectionSearchClient(AsyncCollectionSearchClient):
                             )
             except KeyError:
                 logger.error(f"Access control not found for catalog {catalog['id']}")
-                if username == "":
+                if authorization == "unauthorized":
                     raise HTTPException(
                         status_code=401, detail="User is not authenticated"
                     )
@@ -2401,7 +2382,7 @@ class EsAsyncCollectionSearchClient(AsyncCollectionSearchClient):
                 base_url=base_url,
                 token=token,
                 sort=sort,
-                username=username,
+                workspaces=workspaces,
                 catalog_path=catalog_path,
             )
         )
@@ -2439,7 +2420,7 @@ class EsAsyncCollectionSearchClient(AsyncCollectionSearchClient):
     async def get_all_collections(
         self,
         request: Request,
-        username_header: dict,
+        headers: dict,
         catalog_path: str = None,
         bbox: Optional[List[NumType]] = None,
         datetime: Optional[Union[str, datetime_type]] = None,
@@ -2451,7 +2432,7 @@ class EsAsyncCollectionSearchClient(AsyncCollectionSearchClient):
         Called with `GET /collection-search`.
         Args:
             request (Request): The incoming request.
-            username_header (dict): X-Username header from the request.
+            headers (dict): X-Workspaces header from the request.
             bbox (Optional[List[NumType]]): Bounding box to search in.
             datetime (Optional[Union[str, datetime_type]]): Filter items based on the datetime field.
             limit (Optional[int]): Maximum number of results to return.
@@ -2484,7 +2465,7 @@ class EsAsyncCollectionSearchClient(AsyncCollectionSearchClient):
         resp = await self.post_all_collections(
             search_request=search_request,
             request=request,
-            username_header=username_header,
+            headers=headers,
             catalog_path=catalog_path,
         )
 
@@ -2521,7 +2502,7 @@ class EsAsyncDiscoverySearchClient(AsyncDiscoverySearchClient):
         self,
         search_request: BaseDiscoverySearchPostRequest,
         request: Request,
-        username_header: dict,
+        headers: dict,
         **kwargs,
     ) -> Collections:
         """
@@ -2530,7 +2511,7 @@ class EsAsyncDiscoverySearchClient(AsyncDiscoverySearchClient):
         Args:
             search_request (BaseCollectionSearchPostRequest): Request object that includes the parameters for the search.
             request (Request): The incoming request.
-            username_header (dict): X-Username header from the request.
+            headers (dict): X-Workspaces header from the request.
             **kwargs: Keyword arguments passed to the function.
 
         Returns:
@@ -2544,11 +2525,8 @@ class EsAsyncDiscoverySearchClient(AsyncDiscoverySearchClient):
         token = request.query_params.get("token")
         limit = int(request.query_params.get("limit", 10))
 
-        # Extract X-Username header from username_header for access control
-        username = username_header.get("X-Username", "")
-
-        # Get user index
-        user_index = hash_to_index(username)
+        # Extract X-Workspaces header from headers for access control
+        workspaces = headers.get("X-Workspaces", "")
 
         search = self.database.make_discovery_search()
 
@@ -2569,7 +2547,7 @@ class EsAsyncDiscoverySearchClient(AsyncDiscoverySearchClient):
                 limit=limit,
                 token=token,
                 sort=None,  # use default sort for the minute
-                username=username,
+                workspaces=workspaces,
                 base_url=base_url,
                 conformance_classes=self.conformance_classes(),
             )
@@ -2587,7 +2565,7 @@ class EsAsyncDiscoverySearchClient(AsyncDiscoverySearchClient):
     async def get_discovery_search(
         self,
         request: Request,
-        username_header: dict,
+        headers: dict,
         q: Optional[List[str]] = None,
         limit: Optional[int] = 10,
         **kwargs,
@@ -2596,7 +2574,7 @@ class EsAsyncDiscoverySearchClient(AsyncDiscoverySearchClient):
         Called with `GET /catalogues`.
         Args:
             request (Request): The incoming request.
-            username_header (dict): X-Username header from the request.
+            headers (dict): X-Workspaces header from the request.
             q (Optional[List[str]]): Query string to filter the results.
             limit (Optional[int]): Maximum number of results to return.
             kwargs: Additional parameters to be passed to the API.
@@ -2621,7 +2599,7 @@ class EsAsyncDiscoverySearchClient(AsyncDiscoverySearchClient):
         resp = await self.post_discovery_search(
             search_request=search_request,
             request=request,
-            username_header=username_header,
+            headers=headers,
         )
 
         return resp
