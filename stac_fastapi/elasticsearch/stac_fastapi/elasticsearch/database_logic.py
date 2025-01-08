@@ -987,7 +987,6 @@ class DatabaseLogic:
         child_data = list(zip(sub_catalogs_responses, collection_responses))
 
         catalogs = []
-        collections = []
         for i, hit in enumerate(allowed_hits):
             catalog_path = hit["_index"].split("_", 1)[1]
             catalog_path_list = catalog_path.split(CATALOG_SEPARATOR)
@@ -1001,6 +1000,7 @@ class DatabaseLogic:
                     if hit["_source"]["_sfapi_internal"]["inf_public"] or hit["_source"]["_sfapi_internal"]["owner"] in workspaces:
                         sub_catalogs.append(sub_catalog["_source"])
             # Extract collections
+            collections = []
             for collection in sub_data_catalogs_and_collections[1]:
                 if collection["_source"]:
                     if hit["_source"]["_sfapi_internal"]["inf_public"] or hit["_source"]["_sfapi_internal"]["owner"] in workspaces:
