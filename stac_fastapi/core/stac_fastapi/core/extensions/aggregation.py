@@ -41,6 +41,9 @@ class EsAggregationExtensionGetRequest(
 ):
     """Implementation specific query parameters for aggregation precision."""
 
+    cat_path: Optional[
+        Annotated[str, Path(description="Catalog Path")]
+    ] = attr.ib(default=None)
     collection_id: Optional[
         Annotated[str, Path(description="Collection ID")]
     ] = attr.ib(default=None)
@@ -129,7 +132,7 @@ class EsAsyncAggregationClient(AsyncBaseAggregationClient):
     SUPPORTED_DATETIME_INTERVAL = {"day", "month", "year"}
     DEFAULT_DATETIME_INTERVAL = "month"
 
-    async def get_aggregations(self, collection_id: Optional[str] = None, **kwargs):
+    async def get_aggregations(self, cat_path: Optional[str] = None, collection_id: Optional[str] = None, **kwargs):
         """Get the available aggregations for a catalog or collection defined in the STAC JSON. If no aggregations, default aggregations are used."""
         request: Request = kwargs["request"]
         base_url = str(request.base_url)
@@ -331,6 +334,9 @@ class EsAsyncAggregationClient(AsyncBaseAggregationClient):
     async def aggregate(
         self,
         aggregate_request: Optional[EsAggregationExtensionPostRequest] = None,
+        cat_path: Optional[
+            Annotated[str, Path(description="Catalog Path")]
+        ] = None,
         collection_id: Optional[
             Annotated[str, Path(description="Collection ID")]
         ] = None,
@@ -434,6 +440,9 @@ class EsAsyncAggregationClient(AsyncBaseAggregationClient):
             search = self.database.apply_intersects_filter(
                 search=search, intersects=aggregate_request.intersects
             )
+
+        if cat_path:
+            search = self.database.apply_catalogs_filter(search=search, cat_path=cat_path)
 
         if aggregate_request.collections:
             search = self.database.apply_collections_filter(

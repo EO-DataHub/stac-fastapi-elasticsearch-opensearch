@@ -111,6 +111,7 @@ class BaseLinks:
 class CollectionLinks(BaseLinks):
     """Create inferred links specific to collections."""
 
+    catalog_path: str = attr.ib()
     collection_id: str = attr.ib()
     extensions: List[str] = attr.ib(default=attr.Factory(list))
 
@@ -119,7 +120,7 @@ class CollectionLinks(BaseLinks):
         return dict(
             rel=Relations.self.value,
             type=MimeTypes.json.value,
-            href=urljoin(self.base_url, f"collections/{self.collection_id}"),
+            href=urljoin(self.base_url, f"{self.catalog_path}/collections/{self.collection_id}"),
         )
 
     def link_parent(self) -> Dict[str, Any]:
@@ -131,7 +132,7 @@ class CollectionLinks(BaseLinks):
         return dict(
             rel="items",
             type=MimeTypes.geojson.value,
-            href=urljoin(self.base_url, f"collections/{self.collection_id}/items"),
+            href=urljoin(self.base_url, f"{self.catalog_path}/collections/{self.collection_id}/items"),
         )
 
     def link_queryables(self) -> Dict[str, Any]:
@@ -141,7 +142,7 @@ class CollectionLinks(BaseLinks):
                 rel="queryables",
                 type=MimeTypes.json.value,
                 href=urljoin(
-                    self.base_url, f"collections/{self.collection_id}/queryables"
+                    self.base_url, f"{self.catalog_path}/collections/{self.collection_id}/queryables"
                 ),
             )
         else:
@@ -154,7 +155,7 @@ class CollectionLinks(BaseLinks):
                 rel="aggregate",
                 type=MimeTypes.json.value,
                 href=urljoin(
-                    self.base_url, f"collections/{self.collection_id}/aggregate"
+                    self.base_url, f"{self.catalog_path}/collections/{self.collection_id}/aggregate"
                 ),
             )
         else:
@@ -167,12 +168,88 @@ class CollectionLinks(BaseLinks):
                 rel="aggregations",
                 type=MimeTypes.json.value,
                 href=urljoin(
-                    self.base_url, f"collections/{self.collection_id}/aggregations"
+                    self.base_url, f"{self.catalog_path}/collections/{self.collection_id}/aggregations"
                 ),
             )
         else:
             return None
 
+
+@attr.s
+class CatalogLinks(BaseLinks):
+    """Create inferred links specific to catalogs."""
+
+    catalog_path: str = attr.ib()
+    catalog_id: str = attr.ib()
+    extensions: List[str] = attr.ib(default=attr.Factory(list))
+
+    def link_self(self) -> Dict:
+        """Return the self link."""
+        return dict(
+            rel=Relations.self.value,
+            type=MimeTypes.json.value,
+            href=urljoin(self.base_url, f"{self.catalog_path}/catalogs/{self.catalog_id}"),
+        )
+
+    def link_parent(self) -> Dict[str, Any]:
+        """Create the `parent` link."""
+        return dict(rel=Relations.parent, type=MimeTypes.json.value, href=self.base_url)
+
+    def link_collections(self) -> Dict[str, Any]:
+        """Create the `collections` link."""
+        return dict(
+            rel="collections",
+            type=MimeTypes.geojson.value,
+            href=urljoin(self.base_url, f"{self.catalog_path}/catalogs/{self.catalog_id}/collections"),
+        )
+    
+    def link_catalogs(self) -> Dict[str, Any]:
+        """Create the `catalogs` link."""
+        return dict(
+            rel="catalogs",
+            type=MimeTypes.geojson.value,
+            href=urljoin(self.base_url, f"{self.catalog_path}/catalogs/{self.catalog_id}/catalogs"),
+        )
+
+
+    def link_queryables(self) -> Dict[str, Any]:
+        """Create the `queryables` link."""
+        if "FilterExtension" in self.extensions:
+            return dict(
+                rel="queryables",
+                type=MimeTypes.json.value,
+                href=urljoin(
+                    self.base_url, f"{self.catalog_path}/catalogs/{self.catalog_id}/queryables"
+                ),
+            )
+        else:
+            return None
+
+    def link_aggregate(self) -> Dict[str, Any]:
+        """Create the `aggregate` link."""
+        if "AggregationExtension" in self.extensions:
+            return dict(
+                rel="aggregate",
+                type=MimeTypes.json.value,
+                href=urljoin(
+                    self.base_url, f"{self.catalog_path}/catalogs/{self.catalog_id}/aggregate"
+                ),
+            )
+        else:
+            return None
+
+    def link_aggregations(self) -> Dict[str, Any]:
+        """Create the `aggregations` link."""
+        if "AggregationExtension" in self.extensions:
+            return dict(
+                rel="aggregations",
+                type=MimeTypes.json.value,
+                href=urljoin(
+                    self.base_url, f"{self.catalog_path}/catalogs/{self.catalog_id}/aggregations"
+                ),
+            )
+        else:
+            return None
 
 @attr.s
 class PagingLinks(BaseLinks):
