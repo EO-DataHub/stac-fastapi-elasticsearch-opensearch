@@ -1,7 +1,7 @@
 """Serializers."""
 import abc
 from copy import deepcopy
-from typing import Any, List, Optional
+from typing import Any, List, Optional, Tuple
 
 import attr
 from starlette.requests import Request
@@ -14,6 +14,14 @@ from stac_fastapi.types.links import ItemLinks, resolve_links
 from urllib.parse import urljoin
 from stac_pydantic.shared import MimeTypes
 
+def unhash_cat_path(hashed_cat_path: str) -> Tuple[str, str]:
+        print(f"Unhashing cat path {hashed_cat_path}")
+        cat_path = hashed_cat_path.replace(",", "/catalogs/")
+        print(cat_path)
+        if cat_path:
+            cat_path = "catalogs" + "/" + cat_path
+        print(f"Unhashed cat path {cat_path}")
+        return cat_path
 
 @attr.s
 class Serializer(abc.ABC):
@@ -75,7 +83,7 @@ class ItemSerializer(Serializer):
         return stac_data
 
     @classmethod
-    def db_to_stac(cls, cat_path: str, item: dict, base_url: str) -> stac_types.Item:
+    def db_to_stac(cls, item: dict, base_url: str) -> stac_types.Item:
         """Transform database-ready STAC item to STAC item.
 
         Args:
@@ -87,6 +95,7 @@ class ItemSerializer(Serializer):
         """
         item_id = item["id"]
         collection_id = item["collection"]
+        cat_path = unhash_cat_path(item.get("_sfapi_internal", {}).get("cat_path", ""))
         item_links = ItemLinks(
             catalog_path=cat_path, collection_id=collection_id, item_id=item_id, base_url=base_url
         ).create_links()
@@ -135,7 +144,7 @@ class CollectionSerializer(Serializer):
 
     @classmethod
     def db_to_stac(
-        cls, cat_path: str, collection: dict, request: Request, extensions: Optional[List[str]] = []
+        cls, collection: dict, request: Request, extensions: Optional[List[str]] = []
     ) -> stac_types.Collection:
         """Transform database model to STAC collection.
 
@@ -167,6 +176,7 @@ class CollectionSerializer(Serializer):
         collection.setdefault("assets", {})
 
         # Create the collection links using CollectionLinks
+        cat_path = unhash_cat_path(collection.get("_sfapi_internal", {}).get("cat_path", ""))
         collection_links = CollectionLinks(
             catalog_path=cat_path, collection_id=collection_id, request=request, extensions=extensions
         ).create_links()
@@ -209,7 +219,7 @@ class CatalogSerializer(Serializer):
 
     @classmethod
     def db_to_stac(
-        cls, cat_path: str, catalog: dict, request: Request, sub_catalogs: List[str] = [], sub_collections: List[str] = [], extensions: Optional[List[str]] = []
+        cls, catalog: dict, request: Request, sub_catalogs: List[str] = [], sub_collections: List[str] = [], extensions: Optional[List[str]] = []
     ) -> stac_types.Catalog:
         """Transform database model to STAC catalog.
 
@@ -241,6 +251,7 @@ class CatalogSerializer(Serializer):
         catalog.setdefault("assets", {})
 
         # Create the catalog links using CatalogLinks
+        cat_path = unhash_cat_path(catalog.get("_sfapi_internal", {}).get("cat_path", ""))
         catalog_links = CatalogLinks(
             catalog_path=cat_path, catalog_id=catalog_id, request=request, extensions=extensions
         ).create_links()

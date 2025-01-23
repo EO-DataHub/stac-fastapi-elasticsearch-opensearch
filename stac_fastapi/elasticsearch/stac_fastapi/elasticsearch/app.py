@@ -69,10 +69,9 @@ search_extensions = [
     TokenPaginationExtension(),
     filter_extension,
     FreeTextExtension(),
-    
 ]
 
-if os.getenv("STAC_FASTAPI_ENABLE_TRANSACTIONS", "false") == "true":
+if os.getenv("STAC_FASTAPI_ENABLE_TRANSACTIONS", "true") == "true":
     search_extensions.append(
         TransactionExtension(
             client=TransactionsClient(

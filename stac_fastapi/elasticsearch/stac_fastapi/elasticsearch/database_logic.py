@@ -13,6 +13,7 @@ from elasticsearch_dsl import Q, Search
 from starlette.requests import Request
 
 from elasticsearch import exceptions, helpers  # type: ignore
+from fastapi import HTTPException
 from stac_fastapi.core.extensions import filter
 from stac_fastapi.core.serializers import CatalogSerializer, CollectionSerializer, ItemSerializer
 from stac_fastapi.core.utilities import MAX_LIMIT, bbox2polygon
@@ -20,7 +21,8 @@ from stac_fastapi.elasticsearch.config import AsyncElasticsearchSettings
 from stac_fastapi.elasticsearch.config import (
     ElasticsearchSettings as SyncElasticsearchSettings,
 )
-from stac_fastapi.types.errors import ConflictError, NotFoundError, UnauthorizedError, UnauthenticatedError
+from stac_fastapi.types.access_policy import AccessPolicy
+from stac_fastapi.types.errors import ConflictError, NotFoundError
 from stac_fastapi.types.stac import Catalog, Collection, Item
 
 logger = logging.getLogger(__name__)
@@ -55,6 +57,10 @@ DEFAULT_SORT = {
     "properties.datetime": {"order": "desc"},
     "id": {"order": "desc"},
     "collection": {"order": "desc"},
+}
+
+DEFAULT_COLLECTION_SORT = {
+    "id": {"order": "desc"},
 }
 
 ES_ITEMS_SETTINGS = {
@@ -191,16 +197,90 @@ ES_COLLECTIONS_MAPPINGS = {
         "providers": {"type": "object", "enabled": False},
         "links": {"type": "object", "enabled": False},
         "item_assets": {"type": "object", "enabled": False},
+        "keywords": {"type": "keyword"},
         "_sfapi_internal": {
             "type": "object",
             "properties": {
                 "cat_path": {"type": "keyword"},
                 "owner": {"type": "keyword"},
                 "public": {"type": "boolean"},
+                "geometry": {"type": "geo_shape"},
+                "datetime": {"type": "object", 
+                             "properties": {"start": {"type": "date"},
+                                            "end": {"type": "date"}}},
             }
             # "analyzer": "edge_ngram_analyzer",
         }
     },
+    # "runtime": {
+    #     "collection_start_time": {
+    #         "type": "date",
+    #         "on_script_error": "continue",
+    #         "script": {
+    #             "source": """
+    #             def times = params._source.extent.temporal.interval; 
+    #             def time = times[0][0]; 
+    #             if (time == null) { 
+    #                 def datetime = ZonedDateTime.parse('0000-10-01T00:00:00Z'); 
+    #                 emit(datetime.toInstant().toEpochMilli()); 
+    #             } 
+    #             else { 
+    #                 def datetime = ZonedDateTime.parse(time); 
+    #                 emit(datetime.toInstant().toEpochMilli())
+    #             }"""
+    #         },
+    #     },
+    #     "collection_end_time": {
+    #         "type": "date",
+    #         "on_script_error": "continue",
+    #         "script": {
+    #             "source": """
+    #             def times = params._source.extent.temporal.interval; 
+    #             def time = times[0][1]; 
+    #             if (time == null) { 
+    #                 def datetime = ZonedDateTime.parse('9900-12-01T12:31:12Z'); 
+    #                 emit(datetime.toInstant().toEpochMilli()); 
+    #             } 
+    #             else { 
+    #                 def datetime = ZonedDateTime.parse(time); 
+    #                 emit(datetime.toInstant().toEpochMilli())
+    #             }"""
+    #         },
+    #     },
+    #     "geometry.shape": {
+    #         "type": "keyword",
+    #         "on_script_error": "continue",
+    #         "script": {"source": "emit('Polygon')"},
+    #     },
+    #     "collection_min_lat": {
+    #         "type": "double",
+    #         "on_script_error": "continue",
+    #         "script": {
+    #             "source": "def bbox = params._source.extent.spatial.bbox; emit(bbox[0][0]);"
+    #         },
+    #     },
+    #     "collection_min_lon": {
+    #         "type": "double",
+    #         "on_script_error": "continue",
+    #         "script": {
+    #             "source": "def bbox = params._source.extent.spatial.bbox; emit(bbox[0][1]);"
+    #         },
+    #     },
+    #     "collection_max_lat": {
+    #         "type": "double",
+    #         "on_script_error": "continue",
+    #         "script": {
+    #             "source": "def bbox = params._source.extent.spatial.bbox; emit(bbox[0][2]);"
+    #         },
+    #     },
+    #     "collection_max_lon": {
+    #         "type": "double",
+    #         "on_script_error": "continue",
+    #         "script": {
+    #             "source": "def bbox = params._source.extent.spatial.bbox; emit(bbox[0][3]);"
+    #         },
+    #     },
+    # }
 }
 
 
@@ -589,7 +669,7 @@ class DatabaseLogic:
 
     """Utils"""
 
-    def hash_cat_path(self, cat_path: str, collection_id: str = None) -> str:
+    def generate_cat_path(self, cat_path: str, collection_id: str = None) -> str:
         print(f"Hashing cat path {cat_path}")
         if cat_path == "root":
             return ""
@@ -602,17 +682,7 @@ class DatabaseLogic:
         print(f"Hashed cat path {cat_path}")
         return cat_path
 
-    def unhash_cat_path(self, hashed_cat_path: str) -> Tuple[str, str]:
-        print(f"Unhashing cat path {hashed_cat_path}")
-        cat_path = hashed_cat_path.replace(",", "/catalogs/")
-        print(cat_path)
-        if cat_path:
-            cat_path = "catalogs" + "/" + cat_path
-        print(f"Unhashed cat path {cat_path}")
-        return cat_path
-
-
-    def hash_parent_id(self, cat_path: str) -> Tuple[str, str]:
+    def generate_parent_id(self, cat_path: str) -> Tuple[str, str]:
         if cat_path.endswith("/"):
             cat_path = cat_path[:-1]
         if cat_path.count("/") > 0:
@@ -622,12 +692,54 @@ class DatabaseLogic:
             catalog_id = cat_path
             cat_path = ""
 
-        hashed_cat_path = self.hash_cat_path(cat_path)
-        if hashed_cat_path:
-            hashed_parent_id = f"{hashed_cat_path}||{catalog_id}"
+        gen_cat_path = self.generate_cat_path(cat_path)
+        if gen_cat_path:
+            gen_parent_id = f"{gen_cat_path}||{catalog_id}"
         else:
-            hashed_parent_id = catalog_id
-        return hashed_parent_id, catalog_id
+            gen_parent_id = catalog_id
+        return gen_parent_id, catalog_id
+    
+    async def update_parent_catalog_access(self, cat_path):
+        parent_id, catalog_id = self.generate_parent_id(cat_path)
+
+        annotations = {"_sfapi_internal": {"inf_public": True}}
+
+        print(f"Updating parent catalog access to be public for {parent_id}")
+
+        await self.client.update(
+            index=CATALOGS_INDEX,
+            id=parent_id,
+            body={"doc": annotations},
+            refresh=True,
+        )
+
+        if cat_path.count("/") > 0:
+            cat_path = cat_path.rsplit("/", 1)[0][:-9]
+            print(f"new cat path {cat_path}")
+            await self.update_parent_catalog_access(cat_path)
+
+    async def update_children_access_items(self, prefix, update_fields):
+        pattern = f"{prefix}*"
+        query = {
+            "query": {
+                "wildcard": {
+                    "_sfapi_internal.cat_path": {
+                        "value": pattern
+                    }
+                }
+            },
+            "script": {
+                "source": "; ".join([f"ctx._source.{k} = params.{k}" for k in update_fields.keys()]),
+                "params": update_fields
+            }
+        }
+
+        response = await self.client.update_by_query(
+            index=ITEMS_INDEX,
+            body=query,
+            refresh=True  # Ensure the index is refreshed after the update
+        )
+
 
     """CORE LOGIC"""
 
@@ -673,7 +785,7 @@ class DatabaseLogic:
         hits = response["hits"]["hits"]
         collections = [
             self.collection_serializer.db_to_stac(
-                cat_path=self.unhash_cat_path(hit["_source"]["_sfapi_internal"]["cat_path"]), collection=hit["_source"], request=request, extensions=self.extensions
+                collection=hit["_source"], request=request, extensions=self.extensions
             )
             for hit in hits
         ]
@@ -690,7 +802,6 @@ class DatabaseLogic:
         limit: int,
         token: Optional[str],
         sort: Optional[Dict[str, Dict[str, str]]],
-        collection_ids: Optional[List[str]],
         ignore_unavailable: bool = True,
     ) -> Tuple[List[Dict[str, Any]], Optional[str]]:
         """Retrieve a list of all collections from Elasticsearch, supporting pagination.
@@ -711,7 +822,7 @@ class DatabaseLogic:
 
         print(query)
 
-        index_param = ITEMS_INDEX #indices(collection_ids)
+        index_param = COLLECTIONS_INDEX #indices(collection_ids)
 
         max_result_window = MAX_LIMIT
 
@@ -722,7 +833,7 @@ class DatabaseLogic:
                 index=index_param,
                 ignore_unavailable=ignore_unavailable,
                 query=query,
-                sort=sort or DEFAULT_SORT,
+                sort=sort or DEFAULT_COLLECTION_SORT,
                 search_after=search_after,
                 size=size_limit,
             )
@@ -739,7 +850,7 @@ class DatabaseLogic:
         try:
             es_response = await search_task
         except exceptions.NotFoundError:
-            raise NotFoundError(f"Collections '{collection_ids}' do not exist")
+            raise NotFoundError(f"Catalog does not exist")
 
         hits = es_response["hits"]["hits"]
         collections = (hit["_source"] for hit in hits[:limit])
@@ -893,7 +1004,7 @@ class DatabaseLogic:
             print(sub_collections)
             catalogs.append(
                 self.catalog_serializer.db_to_stac(
-                    cat_path=self.unhash_cat_path(hit["_source"]["_sfapi_internal"]["cat_path"]), catalog=hit["_source"], sub_catalogs=sub_catalogs, sub_collections=sub_collections, request=request, extensions=self.extensions
+                    catalog=hit["_source"], sub_catalogs=sub_catalogs, sub_collections=sub_collections, request=request, extensions=self.extensions
                 )
             )
 
@@ -921,9 +1032,9 @@ class DatabaseLogic:
             with the index for the Collection as the target index and the combined `mk_item_id` as the document id.
         """
 
-        hashed_cat_path = self.hash_cat_path(cat_path, collection_id)
+        gen_cat_path = self.generate_cat_path(cat_path, collection_id)
 
-        combi_item_path = hashed_cat_path + "||" + item_id
+        combi_item_path = gen_cat_path + "||" + item_id
 
         print(f"Searching for item with id {combi_item_path}")
 
@@ -942,11 +1053,11 @@ class DatabaseLogic:
         access_control = item.get("_sfapi_internal", {})
         if not access_control.get("public", False):
             if not user_is_authenticated:
-                raise UnauthenticatedError("User is not authenticated")
+                raise HTTPException(status_code=401, detail="User is not authenticated")
             for workspace in workspaces:
-                if workspace == access_control("owner", ""):
+                if workspace == access_control.get("owner", ""):
                     return item_id
-            raise UnauthorizedError("User is not authorized to access this item")
+            raise HTTPException(status_code=403, detail="User is not authorized to access this item")
 
         return item
 
@@ -967,7 +1078,7 @@ class DatabaseLogic:
     
     def apply_catalogs_filter(self, search: Search, catalog_path: str):
         """Database logic to search STAC catalog path."""
-        cat_path = self.hash_cat_path(catalog_path)
+        cat_path = self.generate_cat_path(catalog_path)
         return search.filter("term", **{"_sfapi_internal.cat_path": cat_path})
     
     @staticmethod
@@ -978,7 +1089,6 @@ class DatabaseLogic:
         or_condition = Q("term", **{"_sfapi_internal.public": True})
         for workspace in workspaces:
             or_condition = or_condition | Q("term", **{"_sfapi_internal.owner": workspace})
-        # or_condition = Q("term", **{"_sfapi_internal.public": True}) | Q("term", **{"_sfapi_internal.owner": workspace})
 
         # Apply the OR condition to the search
         search = search.query(or_condition)
@@ -1006,6 +1116,87 @@ class DatabaseLogic:
             search = search.filter(
                 "range", properties__datetime={"gte": datetime_search["gte"]}
             )
+        return search
+
+    @staticmethod
+    def apply_datetime_collections_filter(search: Search, datetime_search):
+        """Apply a filter to search collections based on datetime field.
+
+        Args:
+            search (Search): The search object to filter.
+            datetime_search (dict): The datetime filter criteria.
+
+        Returns:
+            Search: The filtered search object.
+        """
+        if "eq" in datetime_search:
+            search = search.filter(
+                "range", **{"_sfapi_internal.datetime.start": {"lte": datetime_search["eq"]}}
+            )
+            search = search.filter(
+                "range", **{"_sfapi_internal.datetime.end": {"gte": datetime_search["eq"]}}
+            )
+        elif datetime_search["lte"] == None:
+            search = search.filter(
+                "range", **{"_sfapi_internal.datetime.end": {"gte": datetime_search["gte"]}}
+            )
+        elif datetime_search["gte"] == None:
+            search = search.filter(
+                "range", **{"_sfapi_internal.datetime.start": {"lte": datetime_search["lte"]}}
+            )
+        else:
+            should = []
+            should.extend(
+                [
+                    Q(
+                        "bool",
+                        filter=[
+                            Q(
+                                "range",
+                                **{"_sfapi_internal.datetime.start":{
+                                    "lte": datetime_search["lte"],
+                                    "gte": datetime_search["gte"],
+                                },
+                                }
+                            ),
+                        ],
+                    ),
+                    Q(
+                        "bool",
+                        filter=[
+                            Q(
+                                "range",
+                                **{"_sfapi_internal.datetime.end":{
+                                    "lte": datetime_search["lte"],
+                                    "gte": datetime_search["gte"],
+                                    },
+                                }
+                            ),
+                        ],
+                    ),
+                    Q(
+                        "bool",
+                        filter=[
+                            Q(
+                                "range",
+                                **{"_sfapi_internal.datetime.start":{
+                                    "lte": datetime_search["gte"],
+                                },
+                                }
+                            ),
+                            Q(
+                                "range",
+                                **{"_sfapi_internal.datetime.end":{
+                                    "gte": datetime_search["lte"],
+                                },
+                                }
+                            ),
+                        ],
+                    ),
+                ]
+            )
+            search = search.query(Q("bool", filter=[Q("bool", should=should)]))
+
         return search
 
     @staticmethod
@@ -1038,6 +1229,72 @@ class DatabaseLogic:
                 }
             )
         )
+    
+    @staticmethod
+    def apply_bbox_collections_filter(search: Search, bbox: List):
+        """Filter collections search results based on bounding box.
+
+        Args:
+            search (Search): The search object to apply the filter to.
+            bbox (List): The bounding box coordinates, represented as a list of four values [minx, miny, maxx, maxy].
+
+        Returns:
+            search (Search): The search object with the bounding box filter applied.
+        """
+
+        return search.filter(
+            Q(
+                {
+                    "geo_shape": {
+                        "_sfapi_internal.geometry": {
+                            "shape": {
+                                "type": "polygon",
+                                "coordinates": bbox2polygon(*bbox),
+                            },
+                            "relation": "intersects",
+                        }
+                    }
+                }
+            )
+        )
+
+    @staticmethod
+    def apply_keyword_collections_filter(search: Search, q: List[str]):
+        print(q)
+        q_str = ",".join(q)
+        should = []
+        should.extend(
+            [
+                Q(
+                    "bool",
+                    filter=[
+                        Q(
+                            "match",
+                            title={"query": q_str},
+                        ),
+                    ],
+                ),
+                Q(
+                    "bool",
+                    filter=[
+                        Q(
+                            "match",
+                            description={"query": q_str},
+                        ),
+                    ],
+                ),
+                Q(
+                    "bool",
+                    filter=[
+                        Q("terms", keywords=q),
+                    ],
+                ),
+            ]
+        )
+
+        search = search.query(Q("bool", filter=[Q("bool", should=should)]))
+
+        return search
 
     @staticmethod
     def apply_intersects_filter(
@@ -1385,9 +1642,9 @@ class DatabaseLogic:
         # todo: check if collection exists, but cache
         item_id = item["id"]
         collection_id = item["collection"]
-        hashed_cat_path = self.hash_cat_path(cat_path)
-        combi_collection_id = hashed_cat_path + "||" +collection_id
-        combi_item_id = self.hash_cat_path(cat_path, collection_id) + "||" + item_id
+        gen_cat_path = self.generate_cat_path(cat_path)
+        combi_collection_id = gen_cat_path + "||" +collection_id
+        combi_item_id = self.generate_cat_path(cat_path, collection_id) + "||" + item_id
 
         if await self.client.exists(index=ITEMS_INDEX, id=combi_item_id):
             raise ConflictError(f"Item {item_id} already exists in Collection {collection_id}")
@@ -1402,15 +1659,16 @@ class DatabaseLogic:
         if cat_path != "root":
             access_control = parent_collection.get("_sfapi_internal", {})
             if access_control.get("owner") != workspace:
-                raise UnauthorizedError("You do not have permission to create items in this collection")
+                raise HTTPException(status_code=403, detail="You do not have permission to create items in this collection")
         else:
             if workspace != ADMIN_WORKSPACE:
-                raise UnauthorizedError("Only admin can create items at root level")
+                raise HTTPException(status_code=403, detail="Only admin can create items at root level")
 
         item.setdefault("_sfapi_internal", {})
-        item["_sfapi_internal"].update({"cat_path": hashed_cat_path})
+        item["_sfapi_internal"].update({"cat_path": gen_cat_path})
         item["_sfapi_internal"].update({"owner": workspace})
-        item["_sfapi_internal"].update({"public": access_control.get("public")})
+        item["_sfapi_internal"].update({"exp_public": access_control.get("public")}) 
+        item["_sfapi_internal"].update({"inf_public": access_control.get("public")})
 
         es_resp = await self.client.index(
             index=ITEMS_INDEX,
@@ -1440,7 +1698,7 @@ class DatabaseLogic:
             NotFoundError: If the Item does not exist in the database.
         """
 
-        combi_item_id = self.hash_cat_path(cat_path, collection_id) + "||" + item_id
+        combi_item_id = self.generate_cat_path(cat_path, collection_id) + "||" + item_id
 
         try:
             await self.client.delete(
@@ -1477,9 +1735,9 @@ class DatabaseLogic:
             catalog_id = cat_path
             cat_path = "root"
         cat_path = cat_path[:-9] if cat_path.endswith("/catalogs") else cat_path # remove trailing /catalogs
-        hashed_cat_path = self.hash_cat_path(cat_path)
-        if hashed_cat_path:
-            combi_cat_path = hashed_cat_path + "||" + catalog_id
+        gen_cat_path = self.generate_cat_path(cat_path)
+        if gen_cat_path:
+            combi_cat_path = gen_cat_path + "||" + catalog_id
         else:
             combi_cat_path = catalog_id
 
@@ -1494,11 +1752,11 @@ class DatabaseLogic:
         access_control = catalog.get("_sfapi_internal")
         if not access_control.get("public", False):
             if not user_is_authenticated:
-                raise UnauthenticatedError("User is not authenticated")
+                raise HTTPException(status_code=401, detail="User is not authenticated")
             for workspace in workspaces:
-                if workspace == access_control("owner", ""):
+                if workspace == access_control.get("owner", ""):
                     return catalog
-            raise UnauthorizedError("User is not authorized to access this catalog")
+            raise HTTPException(status_code=403, detail="User is not authorized to access this catalog")
 
         return catalog
         
@@ -1520,13 +1778,13 @@ class DatabaseLogic:
         """
 
         catalog_id = catalog["id"]
-        hashed_cat_path = self.hash_cat_path(cat_path)
+        gen_cat_path = self.generate_cat_path(cat_path)
 
         if cat_path == "root":
             combi_catalog_id = catalog_id
         else:
             catalog_id = catalog["id"]
-            combi_catalog_id = hashed_cat_path + "||" + catalog_id
+            combi_catalog_id = gen_cat_path + "||" + catalog_id
 
         if await self.client.exists(index=CATALOGS_INDEX, id=combi_catalog_id):
             raise ConflictError(f"Catalog {catalog_id} already exists")
@@ -1535,7 +1793,7 @@ class DatabaseLogic:
 
         # Check if parent catalog exists
         if cat_path != "root":
-            parent_path, parent_id = self.hash_parent_id(cat_path)
+            parent_path, parent_id = self.generate_parent_id(cat_path)
             try:
                 parent_catalog = await self.client.get(index=CATALOGS_INDEX, id=parent_path)
                 parent_catalog = parent_catalog["_source"]
@@ -1543,26 +1801,27 @@ class DatabaseLogic:
                 raise NotFoundError(f"Parent catalog {parent_id} not found")
             access_control = parent_catalog.get("_sfapi_internal", {})
             if access_control.get("owner") != workspace:
-                if access_control.get("owner") == ADMIN_WORKSPACE and hashed_cat_path == USER_WRITEABLE_CATALOG:
+                if access_control.get("owner") == ADMIN_WORKSPACE and gen_cat_path == USER_WRITEABLE_CATALOG:
                     pass
                 else:
-                    raise UnauthorizedError("You do not have permission to create catalogs in this catalog")
+                    raise HTTPException(status_code=403, detail="You do not have permission to create catalogs in this catalog")
         else:
             if workspace != ADMIN_WORKSPACE:
-                raise UnauthorizedError("Only admin can create catalogs at root level")
+                raise HTTPException(status_code=403, detail="Only admin can create catalogs at root level")
         if workspace == ADMIN_WORKSPACE:
             is_public = True
         elif parent_catalog and access_control.get("owner") == ADMIN_WORKSPACE:
             is_public = False # if parent catalog is owned by admin, set this private
         elif parent_catalog and access_control.get("owner") == workspace:
-            is_public = access_control.get("public") # if parent catalog is owned by user, set this to parent's value
+            is_public = access_control.get("exp_public") # if parent catalog is owned by user, set this to parent's value
         else:
             is_public = False # otherwise set private
 
         catalog.setdefault("_sfapi_internal", {})
-        catalog["_sfapi_internal"].update({"cat_path": hashed_cat_path})
+        catalog["_sfapi_internal"].update({"cat_path": gen_cat_path})
         catalog["_sfapi_internal"].update({"owner": workspace})
-        catalog["_sfapi_internal"].update({"public": is_public})
+        catalog["_sfapi_internal"].update({"exp_public": is_public}) # explicit public setting (from parent)
+        catalog["_sfapi_internal"].update({"inf_public": False}) # inferred public setting (from children)
 
         await self.client.index(
             index=CATALOGS_INDEX,
@@ -1596,22 +1855,18 @@ class DatabaseLogic:
         """
 
         if cat_path.count("/") > 0:
-            cat_path, catalog_id = cat_path.rsplit("/", 1)
+            cat_path, catalog_id = cat_path.rsplit("/", 1) # now cat_path ends with "catalogs"
             cat_path = cat_path + "/"
         else:
             catalog_id = cat_path
             cat_path = ""
-        if cat_path == "catalogs":
-            combi_cat_path = catalog_id
+        gen_cat_path = self.generate_cat_path(cat_path)
+        if gen_cat_path:
+            combi_cat_path = gen_cat_path + "||" + catalog["id"]
         else:
-            cat_path = cat_path[:-9] if cat_path.endswith("/catalogs") else cat_path # remove trailing /catalogs
-            hashed_cat_path = self.hash_cat_path(cat_path)
-            if hashed_cat_path:
-                combi_cat_path = hashed_cat_path + "||" + catalog["id"]
-            else:
-                combi_cat_path = catalog["id"]
+            combi_cat_path = catalog["id"]
         
-        prev_catalog = await self.find_catalog(cat_path=cat_path)
+        prev_catalog = await self.client.get(index=CATALOGS_INDEX, id=combi_cat_path)
         prev_catalog = prev_catalog["_source"]
 
         if catalog_id != catalog["id"]:
@@ -1620,7 +1875,7 @@ class DatabaseLogic:
             
             await self.create_collection(cat_path, collection, refresh=refresh)
 
-            new_combi_collection_id = hashed_cat_path + collection["id"]
+            new_combi_collection_id = gen_cat_path + collection["id"]
             await self.client.reindex(
                 body={
                     "dest": {"index": f"{ITEMS_INDEX_PREFIX}"},
@@ -1640,18 +1895,81 @@ class DatabaseLogic:
             # Check if workspace has permissions to update
             access_control = prev_catalog.get("_sfapi_internal", {})
             if access_control.get("owner") != workspace:
-                raise UnauthorizedError("You do not have permission to create catalogs in this catalog")
+                raise HTTPException(status_code=403, detail="You do not have permission to create catalogs in this catalog")
 
             catalog.setdefault("_sfapi_internal", {})
-            catalog["_sfapi_internal"].update({"cat_path": hashed_cat_path})
+            catalog["_sfapi_internal"].update({"cat_path": gen_cat_path})
             catalog["_sfapi_internal"].update({"owner": workspace})
-            catalog["_sfapi_internal"].update({"public": access_control.get("public")})
+            catalog["_sfapi_internal"].update({"exp_public": access_control.get("exp_public", False)}) # explicit public setting (from parent)
+            catalog["_sfapi_internal"].update({"inf_public": access_control.get("inf_public", False)}) # inferred public setting (from children)
             await self.client.index(
                 index=CATALOGS_INDEX,
                 id=combi_cat_path,
                 document=catalog,
                 refresh=refresh,
             )
+
+    async def update_catalog_access_policy(
+        self, cat_path: str, access_policy: AccessPolicy, workspace: str, refresh: bool = False
+    ):
+        """Update catalog access policy.
+
+        Args:
+            self: The instance of the object calling this function.
+            collection_id (str): The ID of the collection to be updated.
+            collection (Collection): The Collection object to be used for the update.
+
+        Raises:
+            NotFoundError: If the collection with the given `collection_id` is not
+            found in the database.
+
+        Notes:
+            This function updates the collection in the database using the specified
+            `collection_id` and with the collection specified in the `Collection` object.
+            If the collection is not found, a `NotFoundError` is raised.
+        """
+
+        if cat_path.count("/") > 0:
+            parent_cat_path, catalog_id = cat_path.rsplit("/", 1) # now cat_path ends with "catalogs"
+            parent_cat_path = parent_cat_path + "/"
+        else:
+            catalog_id = cat_path
+            parent_cat_path = ""
+        gen_cat_path = self.generate_cat_path(parent_cat_path)
+        if gen_cat_path:
+            combi_cat_path = gen_cat_path + "||" + catalog_id
+        else:
+            combi_cat_path = catalog_id
+
+        prev_catalog = await self.client.get(index=CATALOGS_INDEX, id=combi_cat_path)
+        prev_catalog = prev_catalog["_source"]
+
+        # Check if workspace has permissions to update
+        access_control = prev_catalog.get("_sfapi_internal", {})
+        if access_control.get("owner") != workspace:
+            raise HTTPException(status_code=403, detail="You do not have permission to update access policy for this catalog")
+
+        annotations = {"_sfapi_internal": {"exp_public": access_policy.get("public", False)}}
+
+        await self.client.update(
+                index=CATALOGS_INDEX,
+                id=combi_cat_path,
+                body={"doc": annotations},
+                refresh=True,
+            )
+
+        #  Need to update parent access to ensure access when now public
+        if access_policy.get("public", False):
+            if parent_cat_path:
+                cat_path = cat_path.rsplit("/", 1)[0][:-9] # remove trailing "/catalogs"
+                await self.update_parent_catalog_access(cat_path)
+        
+        # await self.client.index(
+        #     index=COLLECTIONS_INDEX,
+        #     id=combi_cat_path,
+        #     document=prev_catalog,
+        #     refresh=refresh,
+        # )
 
     async def delete_catalog(self, cat_path: str, workspace: str, refresh: bool = False):
         """Delete a catalog from the database.
@@ -1676,13 +1994,13 @@ class DatabaseLogic:
             catalog_id = cat_path
             parent_cat_path = ""
         parent_cat_path = parent_cat_path[:-9] if parent_cat_path.endswith("/catalogs") else parent_cat_path # remove trailing /catalogs
-        hashed_parent_cat_path = self.hash_cat_path(parent_cat_path) 
+        hashed_parent_cat_path = self.generate_cat_path(parent_cat_path) 
         if hashed_parent_cat_path:
             combi_cat_path = hashed_parent_cat_path + "||" + catalog_id
         else:
             combi_cat_path = catalog_id
 
-        hashed_cat_path = self.hash_cat_path(cat_path)
+        gen_cat_path = self.generate_cat_path(cat_path)
 
         # Check if workspace has permissions to delete
         try:
@@ -1691,15 +2009,15 @@ class DatabaseLogic:
         except exceptions.NotFoundError:
             raise NotFoundError(f"Catalog {catalog_id} not found")
         access_control = prev_catalog.get("_sfapi_internal", {})
-        if access_control("owner") != workspace:
-            raise UnauthorizedError("You do not have permission to delete catalogs in this catalog")
-        print(f"Deleting combi cat path {combi_cat_path} and hashed_cat_path {hashed_cat_path}")
+        if access_control.get("owner") != workspace:
+            raise HTTPException(status_code=403, detail="You do not have permission to delete catalogs in this catalog")
+        print(f"Deleting combi cat path {combi_cat_path} and gen_cat_path {gen_cat_path}")
         await self.client.delete(
             index=CATALOGS_INDEX, id=combi_cat_path, refresh=refresh
         )
-        await delete_catalogs_by_id_prefix(hashed_cat_path)
-        await delete_collections_by_id_prefix(hashed_cat_path)
-        await delete_items_by_id_prefix(hashed_cat_path)
+        await delete_catalogs_by_id_prefix(gen_cat_path)
+        await delete_collections_by_id_prefix(gen_cat_path)
+        await delete_items_by_id_prefix(gen_cat_path)
         
 
     async def find_collection(self, cat_path: str, collection_id: str, workspaces: Optional[List[str]], user_is_authenticated: bool) -> Collection:
@@ -1720,8 +2038,8 @@ class DatabaseLogic:
             collection as a `Collection` object. If the collection is not found, a `NotFoundError` is raised.
         """
 
-        hashed_cat_path = self.hash_cat_path(cat_path)
-        combi_collection_id = hashed_cat_path + "||" + collection_id
+        gen_cat_path = self.generate_cat_path(cat_path)
+        combi_collection_id = gen_cat_path + "||" + collection_id
 
         print(f"Searching for collection with id {combi_collection_id}")
 
@@ -1735,14 +2053,34 @@ class DatabaseLogic:
         access_control = collection.get("_sfapi_internal", {})
         if not access_control.get("public", False):
             if not user_is_authenticated:
-                raise UnauthenticatedError("User is not authenticated")
+                raise HTTPException(status_code=401, detail="User is not authenticated")
             for workspace in workspaces:
-                if workspace == access_control("owner", ""):
+                if workspace == access_control.get("owner", ""):
                     return collection
-            raise UnauthorizedError("User is not authorized to access this collection")
+            raise HTTPException(status_code=403, detail="User is not authorized to access this collection")
 
         return collection
     
+    def add_collection_search_fields(self, collection: Collection) -> Collection:
+        bbox = collection.get("extent", {}).get("spatial", {}).get("bbox", [])[0] # get first bbox definition
+        interval = collection.get("extent", {}).get("temporal", {}).get("interval", [])[0] 
+        coordinates = bbox2polygon(*bbox)
+        collection["_sfapi_internal"]["geometry"] = {
+            "type": "Polygon",
+            "coordinates": coordinates
+        }
+        # Define the earliest and latest possible dates
+        # TODO better handle null values here, but this suffices for the time being
+        EARLIEST_DATE = "0000-01-01T00:00:00.000Z"
+        LATEST_DATE = "9999-12-31T00:00:00.000Z"
+        collection["_sfapi_internal"]["datetime"] = {
+            "start": interval[0] if interval[0] else EARLIEST_DATE,
+            "end": interval[1] if interval[1] else LATEST_DATE
+        }
+
+        return collection
+
+
     async def create_collection(self, cat_path: str, collection: Collection, workspace: str, refresh: bool = False):
         """Create a single collection in the database.
 
@@ -1756,38 +2094,40 @@ class DatabaseLogic:
         Notes:
             A new index is created for the items in the Collection using the `create_item_index` function.
         """
-        hashed_cat_path = self.hash_cat_path(cat_path)
+        gen_cat_path = self.generate_cat_path(cat_path)
         collection_id = collection["id"]
-        combi_collection_id = hashed_cat_path + "||" + collection_id
-
-        if await self.client.exists(index=COLLECTIONS_INDEX, id=combi_collection_id):
-            raise ConflictError(f"Collection {collection_id} already exists")
+        combi_collection_id = gen_cat_path + "||" + collection_id
             
         # Check if parent catalog exists
         if cat_path != "root":
-            parent_id, catalog_id = self.hash_parent_id(cat_path)
+            parent_path, parent_id = self.generate_parent_id(cat_path)
             try:
-                parent_catalog = await self.client.get(index=CATALOGS_INDEX, id=parent_id)
+                parent_catalog = await self.client.get(index=CATALOGS_INDEX, id=parent_path)
                 parent_catalog = parent_catalog["_source"]
             except exceptions.NotFoundError:
-                raise NotFoundError(f"Parent catalog {catalog_id} not found")
+                raise NotFoundError(f"Parent catalog {parent_id} not found")
             access_control = parent_catalog.get("_sfapi_internal", {})
             if access_control.get("owner") != workspace:
-                raise UnauthorizedError("You do not have permission to create collections in this catalog")
+                raise HTTPException(status_code=403, detail="You do not have permission to create collections in this catalog")
         else:
             if workspace != ADMIN_WORKSPACE:
-                raise UnauthorizedError("Only admin can create collections at root level")
-
+                raise HTTPException(status_code=403, detail="Only admin can create collections at root level")
+            
+        if await self.client.exists(index=COLLECTIONS_INDEX, id=combi_collection_id):
+            raise ConflictError(f"Collection {collection_id} already exists")
 
         if parent_catalog:
-            is_public = access_control.get("public") # if parent catalog is owned by user, set this to parent's value
+            is_public = access_control.get("exp_public") # if parent catalog is owned by user, set this to parent's value
         else:
             is_public = False # else set private
 
         collection.setdefault("_sfapi_internal", {})
-        collection["_sfapi_internal"].update({"cat_path": hashed_cat_path})
+        collection["_sfapi_internal"].update({"cat_path": gen_cat_path})
         collection["_sfapi_internal"].update({"owner": workspace})
-        collection["_sfapi_internal"].update({"public": is_public})
+        collection["_sfapi_internal"].update({"exp_public": is_public}) # explicit public setting (from parent)
+        collection["_sfapi_internal"].update({"inf_public": False}) # inferred public setting (from children)
+
+        collection = self.add_collection_search_fields(collection)
 
         await self.client.index(
             index=COLLECTIONS_INDEX,
@@ -1820,8 +2160,8 @@ class DatabaseLogic:
             If the collection is not found, a `NotFoundError` is raised.
         """
 
-        hashed_cat_path = hashed_cat_path(cat_path)
-        combi_collection_id = hashed_cat_path + "||" + collection_id
+        gen_cat_path = self.generate_cat_path(cat_path)
+        combi_collection_id = gen_cat_path + "||" + collection_id
         
         try:
             prev_collection = await self.client.get(index=COLLECTIONS_INDEX, id=combi_collection_id)
@@ -1835,7 +2175,7 @@ class DatabaseLogic:
             
             await self.create_collection(cat_path, collection, refresh=refresh)
 
-            new_combi_collection_id = hashed_cat_path + collection["id"]
+            new_combi_collection_id = gen_cat_path + collection["id"]
             await self.client.reindex(
                 body={
                     "dest": {"index": f"{ITEMS_INDEX_PREFIX}"},
@@ -1855,18 +2195,69 @@ class DatabaseLogic:
             # Check if workspace has permissions to update collection
             access_control = prev_collection.get("_sfapi_internal", {})
             if access_control.get("owner") != workspace:
-                raise UnauthorizedError("You do not have permission to update collections in this catalog")
+                raise HTTPException(status_code=403, detail="You do not have permission to update collections in this catalog")
 
             collection.setdefault("_sfapi_internal", {})
-            collection["_sfapi_internal"].update({"cat_path": hashed_cat_path})
+            collection["_sfapi_internal"].update({"cat_path": gen_cat_path})
             collection["_sfapi_internal"].update({"owner": workspace})
-            collection["_sfapi_internal"].update({"public": access_control.get("public")})
+            collection["_sfapi_internal"].update({"exp_public": access_control.get("exp_public", False)}) # explicit public setting (from parent)
+            collection["_sfapi_internal"].update({"inf_public": access_control.get("inf_public", False)}) # inferred public setting (from children)
+            collection = self.add_collection_search_fields(collection)
             await self.client.index(
                 index=COLLECTIONS_INDEX,
-                id=collection["id"],
+                id=combi_collection_id,
                 document=collection,
                 refresh=refresh,
             )
+
+    async def update_collection_access_policy(
+        self, cat_path: str, collection_id: str, access_policy: AccessPolicy, workspace: str, refresh: bool = False
+    ):
+        """Update collection access policy.
+
+        Args:
+            self: The instance of the object calling this function.
+            collection_id (str): The ID of the collection to be updated.
+            collection (Collection): The Collection object to be used for the update.
+
+        Raises:
+            NotFoundError: If the collection with the given `collection_id` is not
+            found in the database.
+
+        Notes:
+            This function updates the collection in the database using the specified
+            `collection_id` and with the collection specified in the `Collection` object.
+            If the collection is not found, a `NotFoundError` is raised.
+        """
+
+        gen_cat_path = self.generate_cat_path(cat_path)
+        combi_collection_id = gen_cat_path + "||" + collection_id
+
+        # Check if workspace has permissions to update collection access control
+        try:
+            prev_collection = await self.client.get(index=COLLECTIONS_INDEX, id=combi_collection_id)
+            prev_collection = prev_collection["_source"]
+        except exceptions.NotFoundError:
+            raise NotFoundError(f"Collection {collection_id} not found")
+        access_control = prev_collection.get("_sfapi_internal", {})
+        if access_control.get("owner") != workspace:
+            raise HTTPException(status_code=403, detail="You do not have permission to update the access policy for this collection")
+
+        annotations = {"_sfapi_internal": {"exp_public": access_policy.get("public", False)}}
+
+        await self.client.update(
+            index=COLLECTIONS_INDEX,
+            id=combi_collection_id,
+            body={"doc": annotations},
+            refresh=True,
+        )
+
+        #  Need to update parent access to ensure access when now public
+        if access_policy.get("public", False):
+            await self.update_parent_catalog_access(cat_path)
+
+        gen_cat_path = self.generate_cat_path(cat_path)
+        await self.update_children_access_items(gen_cat_path, annotations)
 
     async def delete_collection(self, cat_path: str, collection_id: str, workspace: str, refresh: bool = False):
         """Delete a collection from the database.
@@ -1885,8 +2276,8 @@ class DatabaseLogic:
             function also calls `delete_item_index` to delete the index for the items in the collection.
         """
 
-        hashed_cat_path = self.hash_cat_path(cat_path)
-        combi_collection_id = hashed_cat_path + "||" + collection_id
+        gen_cat_path = self.generate_cat_path(cat_path)
+        combi_collection_id = gen_cat_path + "||" + collection_id
 
         # Check if workspace has permissions to update collection
         try:
@@ -1896,14 +2287,14 @@ class DatabaseLogic:
             raise NotFoundError(f"Parent collection {collection_id} not found")
         access_control = prev_collection.get("_sfapi_internal", {})
         if access_control.get("owner") != workspace:
-            raise UnauthorizedError("You do not have permission to delete collections in this catalog")
+            raise HTTPException(status_code=403, detail="You do not have permission to delete collections in this catalog")
 
         await self.client.delete(
             index=COLLECTIONS_INDEX, id=combi_collection_id, refresh=refresh
         )
         # await delete_item_index(combi_collection_id)
 
-        await delete_items_by_id_prefix_and_collection(hashed_cat_path, collection_id)
+        await delete_items_by_id_prefix_and_collection(gen_cat_path, collection_id)
 
 
     async def bulk_async(

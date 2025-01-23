@@ -34,6 +34,7 @@ from stac_fastapi.extensions.third_party.bulk_transactions import (
     Items,
 )
 from stac_fastapi.types import stac as stac_types
+from stac_fastapi.types.access_policy import AccessPolicy
 from stac_fastapi.types.conformance import BASE_CONFORMANCE_CLASSES
 from stac_fastapi.types.core import AsyncBaseCoreClient, AsyncBaseTransactionsClient
 from stac_fastapi.types.extension import ApiExtension
@@ -238,7 +239,16 @@ class CoreClient(AsyncBaseCoreClient):
 
         return landing_page
 
-    async def all_collections(self, auth_headers: dict, cat_path: str = None, **kwargs) -> stac_types.Collections:
+    async def all_collections(
+        self, 
+        auth_headers: dict, 
+        cat_path: str = None, 
+        bbox: Optional[BBox] = None,
+        datetime: Optional[DateTimeType] = None,
+        limit: Optional[int] = 10,
+        token: Optional[str] = None,
+        q: Optional[List[str]] = None,
+        **kwargs) -> stac_types.Collections:
         """Read all collections from the database.
 
         Args:
@@ -249,62 +259,57 @@ class CoreClient(AsyncBaseCoreClient):
         """
         request = kwargs["request"]
         workspaces = auth_headers.get("X-Workspaces", [])
-        base_url = str(request.base_url)
+        user_is_authenticated = auth_headers.get("X-Authenticated", False)
         limit = int(request.query_params.get("limit", 10))
         token = request.query_params.get("token")
+        search = self.database.make_search()
 
-        collections, next_token = await self.database.get_all_collections(
-            cat_path=cat_path, token=token, limit=limit, request=request, workspaces=workspaces
+        if cat_path:
+            await self.database.find_catalog(cat_path=cat_path, workspaces=workspaces, user_is_authenticated=user_is_authenticated)
+
+        # Apply user access filter
+        search = self.database.apply_access_filter(
+            search=search, workspaces=workspaces
         )
 
-        links = [
-            {"rel": Relations.root.value, "type": MimeTypes.json, "href": base_url},
-            {"rel": Relations.parent.value, "type": MimeTypes.json, "href": base_url},
-            {
-                "rel": Relations.self.value,
-                "type": MimeTypes.json,
-                "href": urljoin(base_url, "collections"),
-            },
-        ]
+        if cat_path:
+            search = self.database.apply_catalogs_filter(
+                    search=search, catalog_path=cat_path
+                )
 
-        if next_token:
-            next_link = PagingLinks(next=next_token, request=request).link_next()
-            links.append(next_link)
+        if datetime:
+            datetime_search = CoreClient._return_date(datetime)
+            search = self.database.apply_datetime_collections_filter(
+                search=search, datetime_search=datetime_search
+            )
 
-        return stac_types.Collections(collections=collections, links=links)
+        if bbox:
+            if len(bbox) == 6:
+                bbox = [bbox[0], bbox[1], bbox[3], bbox[4]]
 
-    async def post_all_collections(self, search_request: BaseSearchPostRequest, request: Request, auth_headers: dict, cat_path: str = None, **kwargs) -> stac_types.Collections:
-        """Read all collections from the database.
+            search = self.database.apply_bbox_collections_filter(
+                search=search, bbox=bbox
+            )
 
-        Args:
-            **kwargs: Keyword arguments from the request.
+        if q:
+            search = self.database.apply_keyword_collections_filter(search=search, q=q)
 
-        Returns:
-            A Collections object containing all the collections in the database and links to various resources.
-        """
-        request = kwargs["request"]
-        workspaces = auth_headers.get("X-Workspaces", [])
-        base_url = str(request.base_url)
-        limit = int(request.query_params.get("limit", 10))
-        token = request.query_params.get("token")
+        limit = 10
+        if limit:
+            limit = limit
 
-        collections, next_token = await self.database.get_all_collections(
-            cat_path=cat_path, token=token, limit=limit, request=request, workspaces=workspaces
+        collections, maybe_count, next_token = await self.database.execute_collection_search(
+            search=search,
+            limit=limit,
+            token=token,  # type: ignore
+            sort=None,
         )
 
-        links = [
-            {"rel": Relations.root.value, "type": MimeTypes.json, "href": base_url},
-            {"rel": Relations.parent.value, "type": MimeTypes.json, "href": base_url},
-            {
-                "rel": Relations.self.value,
-                "type": MimeTypes.json,
-                "href": urljoin(base_url, "collections"),
-            },
+        collections = [
+            self.collection_serializer.db_to_stac(collection, request=request) for collection in collections
         ]
 
-        if next_token:
-            next_link = PagingLinks(next=next_token, request=request).link_next()
-            links.append(next_link)
+        links = await PagingLinks(request=request, next=next_token).get_links()
 
         return stac_types.Collections(collections=collections, links=links)
 
@@ -330,7 +335,6 @@ class CoreClient(AsyncBaseCoreClient):
         user_is_authenticated = auth_headers.get("X-Authenticated", False)
         collection = await self.database.find_collection(cat_path=cat_path, collection_id=collection_id, workspaces=workspaces, user_is_authenticated=user_is_authenticated)
         return self.collection_serializer.db_to_stac(
-            cat_path=cat_path,
             collection=collection,
             request=request,
             extensions=[type(ext).__name__ for ext in self.extensions],
@@ -396,7 +400,6 @@ class CoreClient(AsyncBaseCoreClient):
         sub_catalogs = await self.database.get_all_sub_catalogs(cat_path=cat_path, workspaces=workspaces)
         sub_collections = await self.database.get_all_sub_collections(cat_path=cat_path, workspaces=workspaces)
         return self.catalog_serializer.db_to_stac(
-            cat_path=cat_path,
             catalog=catalog,
             sub_catalogs=sub_catalogs,
             sub_collections=sub_collections,
@@ -479,7 +482,7 @@ class CoreClient(AsyncBaseCoreClient):
         )
 
         items = [
-            self.item_serializer.db_to_stac(cat_path, item, base_url=base_url) for item in items
+            self.item_serializer.db_to_stac(item, base_url=base_url) for item in items
         ]
 
         links = await PagingLinks(request=request, next=next_token).get_links()
@@ -514,7 +517,7 @@ class CoreClient(AsyncBaseCoreClient):
         item = await self.database.get_one_item(
             cat_path=cat_path, item_id=item_id, collection_id=collection_id, workspaces=workspaces, user_is_authenticated=user_is_authenticated
         )
-        return self.item_serializer.db_to_stac(cat_path, item, base_url)
+        return self.item_serializer.db_to_stac(item, base_url)
 
     @staticmethod
     def _return_date(
@@ -708,7 +711,7 @@ class CoreClient(AsyncBaseCoreClient):
 
         search = self.database.make_search()
 
-        # Apple user access filter
+        # Apply user access filter
         search = self.database.apply_access_filter(
             search=search, workspaces=workspaces
         )
@@ -801,7 +804,7 @@ class CoreClient(AsyncBaseCoreClient):
 
         items = [
             filter_fields(
-                self.item_serializer.db_to_stac(self.database.unhash_cat_path(item["_sfapi_internal"]["cat_path"]), item, base_url=base_url),
+                self.item_serializer.db_to_stac(item, base_url=base_url),
                 include,
                 exclude,
             )
@@ -867,7 +870,7 @@ class TransactionsClient(AsyncBaseTransactionsClient):
                 raise HTTPException("Collection ID in path does not match collection ID in item")
             item = await self.database.prep_create_item(item=item, base_url=base_url)
             await self.database.create_item(cat_path, collection_id, item, workspace, refresh=kwargs.get("refresh", False))
-            return ItemSerializer.db_to_stac(cat_path, item, base_url)
+            return ItemSerializer.db_to_stac(item, base_url)
 
     @overrides
     async def update_item(
@@ -897,7 +900,7 @@ class TransactionsClient(AsyncBaseTransactionsClient):
         await self.delete_item(cat_path=cat_path, item_id=item_id, collection_id=collection_id)
         await self.create_item(cat_path=cat_path, collection_id=collection_id, item=Item(**item), workspace=workspace, **kwargs)
 
-        return ItemSerializer.db_to_stac(cat_path, item, base_url)
+        return ItemSerializer.db_to_stac(item, base_url)
 
     @overrides
     async def delete_item(
@@ -936,7 +939,6 @@ class TransactionsClient(AsyncBaseTransactionsClient):
         collection = self.database.collection_serializer.stac_to_db(collection, request)
         await self.database.create_collection(cat_path=cat_path, collection=collection, workspace=workspace)
         return CollectionSerializer.db_to_stac(
-            cat_path,
             collection,
             request,
             extensions=[type(ext).__name__ for ext in self.database.extensions],
@@ -975,11 +977,41 @@ class TransactionsClient(AsyncBaseTransactionsClient):
         )
 
         return CollectionSerializer.db_to_stac(
-            cat_path,
             collection,
             request,
             extensions=[type(ext).__name__ for ext in self.database.extensions],
         )
+    
+    @overrides
+    async def update_collection_access_policy(
+        self, cat_path: str, collection_id: str, access_policy: AccessPolicy, workspace: str, **kwargs
+    ) -> str:
+        """
+        Update a collection access policy.
+
+        This method updates an existing collection in the database by first finding
+        the collection by the id given in the keyword argument `collection_id`.
+        If no `collection_id` is given the id of the given collection object is used.
+        If the object and keyword collection ids don't match the sub items
+        collection id is updated else the items are left unchanged.
+        The updated collection is then returned.
+
+        Args:
+            collection_id: id of the existing collection to be updated
+            collection: A STAC collection that needs to be updated.
+            kwargs: Additional keyword arguments.
+
+        Returns:
+            A STAC collection that has been updated in the database.
+
+        """
+        request = kwargs["request"]
+
+        await self.database.update_collection_access_policy(
+            cat_path=cat_path, collection_id=collection_id, access_policy=access_policy, workspace=workspace
+        )
+
+        return "Updated access policy"
 
     @overrides
     async def delete_collection(
@@ -1024,7 +1056,6 @@ class TransactionsClient(AsyncBaseTransactionsClient):
         catalog = self.database.catalog_serializer.stac_to_db(catalog, request)
         await self.database.create_catalog(cat_path=cat_path, catalog=catalog, workspace=workspace)
         return CollectionSerializer.db_to_stac(
-            cat_path,
             catalog,
             request,
             extensions=[type(ext).__name__ for ext in self.database.extensions],
@@ -1055,17 +1086,49 @@ class TransactionsClient(AsyncBaseTransactionsClient):
 
         request = kwargs["request"]
 
-        collection = self.database.catalog_serializer.stac_to_db(catalog, request)
+        catalog = self.database.catalog_serializer.stac_to_db(catalog, request)
         await self.database.update_catalog(
             cat_path=cat_path, catalog=catalog, workspace=workspace
         )
 
         return CatalogSerializer.db_to_stac(
-            cat_path,
             catalog,
             request,
             extensions=[type(ext).__name__ for ext in self.database.extensions],
         )
+    
+    @overrides
+    async def update_catalog_access_policy(
+        self, cat_path: str, access_policy: AccessPolicy, workspace: str, **kwargs
+    ) -> str:
+        """
+        Update a catalog access policy.
+
+        This method updates an existing catalog in the database by first finding
+        the catalog by the id given in the keyword argument `collection_id`.
+        If no `collection_id` is given the id of the given collection object is used.
+        If the object and keyword collection ids don't match the sub items
+        collection id is updated else the items are left unchanged.
+        The updated collection is then returned.
+
+        Args:
+            collection_id: id of the existing collection to be updated
+            collection: A STAC collection that needs to be updated.
+            kwargs: Additional keyword arguments.
+
+        Returns:
+            A STAC catalog that has been updated in the database.
+
+        """
+        request = kwargs["request"]
+
+        await self.database.update_catalog_access_policy(
+            cat_path=cat_path, access_policy=access_policy, workspace=workspace
+        )
+
+        catalog = await self.database.find_catalog(cat_path=cat_path, workspaces=[workspace], user_is_authenticated=True)
+
+        return catalog
 
     @overrides
     async def delete_catalog(
@@ -1246,11 +1309,16 @@ class EsAsyncCollectionSearchClient(AsyncBaseCollectionSearchClient):
     settings: ApiBaseSettings = attr.ib()
     session: Session = attr.ib(default=attr.Factory(Session.create_from_env))
 
+    collection_serializer: Type[CollectionSerializer] = attr.ib(
+        default=CollectionSerializer
+    )
+
     @overrides
     async def post_all_collections(
         self,
         search_request: BaseCollectionSearchPostRequest,
-        cat_path: str = None,
+        auth_headers: dict = {},
+        cat_path: Optional[str] = None,
         **kwargs,
     ) -> stac_types.Collections:
         """Search all available collections.
@@ -1261,4 +1329,68 @@ class EsAsyncCollectionSearchClient(AsyncBaseCollectionSearchClient):
             A list of collections.
 
         """
-        ...
+        request = kwargs["request"]
+        workspaces = auth_headers.get("X-Workspaces", [])
+        user_is_authenticated = auth_headers.get("X-Authenticated", False)
+        limit = int(request.query_params.get("limit", 10))
+        token = request.query_params.get("token")
+
+
+        if cat_path:
+            await self.database.find_catalog(cat_path=cat_path, workspaces=workspaces, user_is_authenticated=user_is_authenticated)
+
+        search = self.database.make_search()
+
+        # Apply user access filter
+        search = self.database.apply_access_filter(
+            search=search, workspaces=workspaces
+        )
+
+        if cat_path:
+            search = self.database.apply_catalogs_filter(
+                    search=search, catalog_path=cat_path
+                )
+
+        if search_request.datetime:
+            datetime_search = CoreClient._return_date(search_request.datetime)
+            search = self.database.apply_datetime_collections_filter(
+                search=search, datetime_search=datetime_search
+            )
+
+        if search_request.bbox:
+            bbox = search_request.bbox
+            if len(bbox) == 6:
+                bbox = [bbox[0], bbox[1], bbox[3], bbox[4]]
+
+            search = self.database.apply_bbox_collections_filter(
+                search=search, bbox=bbox
+            )
+
+        if search_request.q:
+            q = search_request.q
+            search = self.database.apply_keyword_collections_filter(search=search, q=q)
+
+        limit = 10
+        if search_request.limit:
+            limit = search_request.limit
+
+        collections, maybe_count, next_token = await self.database.execute_collection_search(
+            search=search,
+            limit=limit,
+            token=token,  # type: ignore
+            sort=None,
+        )
+
+        collections = [
+            self.collection_serializer.db_to_stac(collection=collection, request=request) for collection in collections
+        ]
+
+        links = await PagingLinks(request=request, next=next_token).get_links()
+
+        return stac_types.Collections(
+            type="Collections",
+            features=collections,
+            links=links,
+            numReturned=len(collections),
+            numMatched=maybe_count,
+        )
