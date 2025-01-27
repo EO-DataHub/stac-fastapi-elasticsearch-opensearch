@@ -130,11 +130,13 @@ setup_rate_limit(app, rate_limit=os.getenv("STAC_FASTAPI_RATE_LIMIT"))
 
 @app.on_event("startup")
 async def _startup_event() -> None:
-    await create_index_templates()
-    # for now we have a single index for each STAC data type
-    await create_item_index()
-    await create_collection_index()
-    await create_catalog_index()
+    # Only create indices when write operations are enabled
+    if os.getenv("STAC_FASTAPI_ENABLE_TRANSACTIONS", "false") == "true":
+        await create_index_templates()
+        # for now we have a single index for each STAC data type
+        await create_item_index()
+        await create_collection_index()
+        await create_catalog_index()
 
 
 def run() -> None:
