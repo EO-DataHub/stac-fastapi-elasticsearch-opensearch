@@ -313,7 +313,7 @@ class CoreClient(AsyncBaseCoreClient):
             parent_href_url = ""
             collections_href_url = "collections"
         else:
-            parent_href_url = cat_path
+            parent_href_url = f"catalogs/{cat_path}"
             collections_href_url = f"catalogs/{cat_path}/collections"
 
         links = [
@@ -385,7 +385,7 @@ class CoreClient(AsyncBaseCoreClient):
             parent_href_url = ""
             catalogs_href_url = "catalogs"
         else:
-            parent_href_url = cat_path
+            parent_href_url = f"catalogs/{cat_path}"
             catalogs_href_url = f"catalogs/{cat_path}/catalogs"
 
         links = [
@@ -1435,17 +1435,19 @@ class EsAsyncCollectionSearchClient(AsyncBaseCollectionSearchClient):
         ]
 
         if not cat_path:
-            href_url = ""
+            parent_href_url = ""
+            collections_href_url = "collections"
         else:
-            href_url = cat_path
+            parent_href_url = f"catalogs/{cat_path}"
+            collections_href_url = f"catalogs/{cat_path}/collections"
 
         links = [
             {"rel": Relations.root.value, "type": MimeTypes.json, "href": base_url},
-            {"rel": Relations.parent.value, "type": MimeTypes.json, "href": urljoin(base_url, href_url)},
+            {"rel": Relations.parent.value, "type": MimeTypes.json, "href": urljoin(base_url, parent_href_url)},
             {
                 "rel": Relations.self.value,
                 "type": MimeTypes.json,
-                "href": urljoin(base_url, "collections"),
+                "href": urljoin(base_url, collections_href_url),
             },
         ]
 
