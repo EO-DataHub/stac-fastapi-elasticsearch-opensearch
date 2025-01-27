@@ -164,7 +164,6 @@ class CoreClient(AsyncBaseCoreClient):
             API landing page, serving as an entry point to the API.
         """
         request: Request = kwargs["request"]
-        workspaces = auth_headers.get("X-Workspaces", [])
         base_url = get_base_url(request)
         landing_page = self._landing_page(
             base_url=base_url,
@@ -258,6 +257,7 @@ class CoreClient(AsyncBaseCoreClient):
             A Collections object containing all the collections in the database and links to various resources.
         """
         request = kwargs["request"]
+        base_url = str(request.base_url)
         workspaces = auth_headers.get("X-Workspaces", [])
         user_is_authenticated = auth_headers.get("X-Authenticated", False)
         limit = int(request.query_params.get("limit", 10))
@@ -309,7 +309,26 @@ class CoreClient(AsyncBaseCoreClient):
             self.collection_serializer.db_to_stac(collection, request=request) for collection in collections
         ]
 
-        links = await PagingLinks(request=request, next=next_token).get_links()
+        if not cat_path:
+            parent_href_url = ""
+            collections_href_url = "collections"
+        else:
+            parent_href_url = cat_path
+            collections_href_url = f"catalogs/{cat_path}/collections"
+
+        links = [
+            {"rel": Relations.root.value, "type": MimeTypes.json, "href": base_url},
+            {"rel": Relations.parent.value, "type": MimeTypes.json, "href": urljoin(base_url, parent_href_url)},
+            {
+                "rel": Relations.self.value,
+                "type": MimeTypes.json,
+                "href": urljoin(base_url, collections_href_url),
+            },
+        ]
+
+        if next_token:
+            next_link = PagingLinks(next=next_token, request=request).link_next()
+            links.append(next_link)
 
         return stac_types.Collections(collections=collections, links=links)
 
@@ -362,13 +381,20 @@ class CoreClient(AsyncBaseCoreClient):
             cat_path=cat_path, token=token, limit=limit, request=request, workspaces=workspaces,
         )
 
+        if not cat_path:
+            parent_href_url = ""
+            catalogs_href_url = "catalogs"
+        else:
+            parent_href_url = cat_path
+            catalogs_href_url = f"catalogs/{cat_path}/catalogs"
+
         links = [
             {"rel": Relations.root.value, "type": MimeTypes.json, "href": base_url},
-            {"rel": Relations.parent.value, "type": MimeTypes.json, "href": base_url},
+            {"rel": Relations.parent.value, "type": MimeTypes.json, "href": urljoin(base_url, parent_href_url)},
             {
                 "rel": Relations.self.value,
                 "type": MimeTypes.json,
-                "href": urljoin(base_url, "catalogs"),
+                "href": urljoin(base_url, catalogs_href_url),
             },
         ]
 
@@ -379,7 +405,7 @@ class CoreClient(AsyncBaseCoreClient):
         return stac_types.Catalogs(catalogs=catalogs, links=links)
 
     async def get_catalog(
-        self, cat_path: str, auth_headers: dict, **kwargs
+        self, catalog_id: str, auth_headers: dict, cat_path: Optional[str]=None,  **kwargs
     ) -> stac_types.Catalog:
         """Get a catalog from the database by its id.
 
@@ -396,6 +422,10 @@ class CoreClient(AsyncBaseCoreClient):
         request = kwargs["request"]
         workspaces = auth_headers.get("X-Workspaces", [])
         user_is_authenticated = auth_headers.get("X-Authenticated", False)
+        if cat_path:
+            cat_path = f"{cat_path}/catalogs/{catalog_id}"
+        else:
+            cat_path = catalog_id
         catalog = await self.database.find_catalog(cat_path=cat_path, workspaces=workspaces, user_is_authenticated=user_is_authenticated)
         sub_catalogs = await self.database.get_all_sub_catalogs(cat_path=cat_path, workspaces=workspaces)
         sub_collections = await self.database.get_all_sub_collections(cat_path=cat_path, workspaces=workspaces)
@@ -443,7 +473,7 @@ class CoreClient(AsyncBaseCoreClient):
         base_url = str(request.base_url)
 
         collection = await self.get_collection(
-            cat_path=cat_path, collection_id=collection_id, request=request, workspaces=workspaces
+            cat_path=cat_path, collection_id=collection_id, request=request, auth_headers=auth_headers
         )
         collection_id = collection.get("id")
         if collection_id is None:
@@ -810,7 +840,27 @@ class CoreClient(AsyncBaseCoreClient):
             )
             for item in items
         ]
-        links = await PagingLinks(request=request, next=next_token).get_links()
+
+        if not cat_path:
+            parent_href_url = ""
+            search_href_url = "search"
+        else:
+            parent_href_url = f"catalogs/{cat_path}"
+            search_href_url = f"catalogs/{cat_path}/search"
+
+        links = [
+            {"rel": Relations.root.value, "type": MimeTypes.json, "href": base_url},
+            {"rel": Relations.parent.value, "type": MimeTypes.json, "href": urljoin(base_url, parent_href_url)},
+            {
+                "rel": Relations.self.value,
+                "type": MimeTypes.json,
+                "href": urljoin(base_url, search_href_url),
+            },
+        ]
+
+        if next_token:
+            next_link = PagingLinks(next=next_token, request=request).link_next()
+            links.append(next_link)
 
         return stac_types.ItemCollection(
             type="FeatureCollection",
@@ -867,8 +917,7 @@ class TransactionsClient(AsyncBaseTransactionsClient):
             return None
         else:
             if collection_id != item["collection"]:
-                raise HTTPException("Collection ID in path does not match collection ID in item")
-            item = await self.database.prep_create_item(item=item, base_url=base_url)
+                raise HTTPException(status_code=400, detail="Collection ID in path does not match collection ID in item")
             await self.database.create_item(cat_path, collection_id, item, workspace, refresh=kwargs.get("refresh", False))
             return ItemSerializer.db_to_stac(item, base_url)
 
@@ -897,7 +946,7 @@ class TransactionsClient(AsyncBaseTransactionsClient):
         item["properties"]["updated"] = now
 
         await self.database.check_collection_exists(cat_path=cat_path, collection_id=collection_id)
-        await self.delete_item(cat_path=cat_path, item_id=item_id, collection_id=collection_id)
+        await self.delete_item(cat_path=cat_path, item_id=item_id, collection_id=collection_id, workspace=workspace)
         await self.create_item(cat_path=cat_path, collection_id=collection_id, item=Item(**item), workspace=workspace, **kwargs)
 
         return ItemSerializer.db_to_stac(item, base_url)
@@ -1330,11 +1379,11 @@ class EsAsyncCollectionSearchClient(AsyncBaseCollectionSearchClient):
 
         """
         request = kwargs["request"]
+        base_url = str(request.base_url)
         workspaces = auth_headers.get("X-Workspaces", [])
         user_is_authenticated = auth_headers.get("X-Authenticated", False)
         limit = int(request.query_params.get("limit", 10))
         token = request.query_params.get("token")
-
 
         if cat_path:
             await self.database.find_catalog(cat_path=cat_path, workspaces=workspaces, user_is_authenticated=user_is_authenticated)
@@ -1385,7 +1434,24 @@ class EsAsyncCollectionSearchClient(AsyncBaseCollectionSearchClient):
             self.collection_serializer.db_to_stac(collection=collection, request=request) for collection in collections
         ]
 
-        links = await PagingLinks(request=request, next=next_token).get_links()
+        if not cat_path:
+            href_url = ""
+        else:
+            href_url = cat_path
+
+        links = [
+            {"rel": Relations.root.value, "type": MimeTypes.json, "href": base_url},
+            {"rel": Relations.parent.value, "type": MimeTypes.json, "href": urljoin(base_url, href_url)},
+            {
+                "rel": Relations.self.value,
+                "type": MimeTypes.json,
+                "href": urljoin(base_url, "collections"),
+            },
+        ]
+
+        if next_token:
+            next_link = PagingLinks(next=next_token, request=request).link_next()
+            links.append(next_link)
 
         return stac_types.Collections(
             type="Collections",
