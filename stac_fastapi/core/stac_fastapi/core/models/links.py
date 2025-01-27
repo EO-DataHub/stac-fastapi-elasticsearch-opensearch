@@ -261,7 +261,32 @@ class CatalogLinks(BaseLinks):
                 rel="queryables",
                 type=MimeTypes.json.value,
                 href=urljoin(
-                    self.base_url, f"{href_url}/queryables"
+                    self.base_url, "queryables"
+                ),
+            )
+        else:
+            return None
+        
+    def link_aggregate(self) -> Dict[str, Any]:
+        """Create the `aggregate` link."""
+        if "AggregationExtension" in self.extensions:
+            return dict(
+                rel="aggregate",
+                type=MimeTypes.json.value,
+                href=urljoin(
+                    self.base_url, "aggregate"
+                ),
+            )
+        else:
+            return None
+    def link_aggregations(self) -> Dict[str, Any]:
+        """Create the `aggregations` link."""
+        if "AggregationExtension" in self.extensions:
+            return dict(
+                rel="aggregations",
+                type=MimeTypes.json.value,
+                href=urljoin(
+                    self.base_url, "aggregations"
                 ),
             )
         else:
