@@ -55,7 +55,7 @@ class BaseLinks:
 
     def link_self(self) -> Dict:
         """Return the self link."""
-        return dict(rel=Relations.self.value, type=MimeTypes.json.value, href=self.url)
+        return dict(rel=Relations.self.value, type=MimeTypes.json.value, href=self.base_url)
 
     def link_root(self) -> Dict:
         """Return the catalog root."""
@@ -120,29 +120,43 @@ class CollectionLinks(BaseLinks):
         return dict(
             rel=Relations.self.value,
             type=MimeTypes.json.value,
-            href=urljoin(self.base_url, f"{self.catalog_path}/collections/{self.collection_id}"),
+            href=urljoin(self.base_url, f"catalogs/{self.catalog_path}/collections/{self.collection_id}"),
         )
 
     def link_parent(self) -> Dict[str, Any]:
         """Create the `parent` link."""
-        return dict(rel=Relations.parent, type=MimeTypes.json.value, href=self.base_url)
+        if not self.catalog_path:
+            href_url = ""
+        else:
+            href_url = f"catalogs/{self.catalog_path}"
+        return dict(rel=Relations.parent, 
+                    type=MimeTypes.json.value, 
+                    href=urljoin(self.base_url, href_url))
 
     def link_items(self) -> Dict[str, Any]:
         """Create the `items` link."""
+        if not self.catalog_path:
+            href_url = ""
+        else:
+            href_url = f"catalogs/{self.catalog_path}/"
         return dict(
             rel="items",
             type=MimeTypes.geojson.value,
-            href=urljoin(self.base_url, f"{self.catalog_path}/collections/{self.collection_id}/items"),
+            href=urljoin(self.base_url, f"{href_url}collections/{self.collection_id}/items"),
         )
 
     def link_queryables(self) -> Dict[str, Any]:
         """Create the `queryables` link."""
         if "FilterExtension" in self.extensions:
+            if not self.catalog_path:
+                href_url = ""
+            else:
+                href_url = f"catalogs/{self.catalog_path}/"
             return dict(
                 rel="queryables",
                 type=MimeTypes.json.value,
                 href=urljoin(
-                    self.base_url, f"{self.catalog_path}/collections/{self.collection_id}/queryables"
+                    self.base_url, f"{href_url}collections/{self.collection_id}/queryables"
                 ),
             )
         else:
@@ -151,11 +165,15 @@ class CollectionLinks(BaseLinks):
     def link_aggregate(self) -> Dict[str, Any]:
         """Create the `aggregate` link."""
         if "AggregationExtension" in self.extensions:
+            if not self.catalog_path:
+                href_url = ""
+            else:
+                href_url = f"catalogs/{self.catalog_path}/"
             return dict(
                 rel="aggregate",
                 type=MimeTypes.json.value,
                 href=urljoin(
-                    self.base_url, f"{self.catalog_path}/collections/{self.collection_id}/aggregate"
+                    self.base_url, f"{href_url}collections/{self.collection_id}/aggregate"
                 ),
             )
         else:
@@ -164,11 +182,15 @@ class CollectionLinks(BaseLinks):
     def link_aggregations(self) -> Dict[str, Any]:
         """Create the `aggregations` link."""
         if "AggregationExtension" in self.extensions:
+            if not self.catalog_path:
+                href_url = ""
+            else:
+                href_url = f"catalogs/{self.catalog_path}/"
             return dict(
                 rel="aggregations",
                 type=MimeTypes.json.value,
                 href=urljoin(
-                    self.base_url, f"{self.catalog_path}/collections/{self.collection_id}/aggregations"
+                    self.base_url, f"{href_url}collections/{self.collection_id}/aggregations"
                 ),
             )
         else:
@@ -185,67 +207,61 @@ class CatalogLinks(BaseLinks):
 
     def link_self(self) -> Dict:
         """Return the self link."""
+        if not self.catalog_path:
+            href_url = f"catalogs/{self.catalog_id}"
+        else:
+            href_url = f"catalogs/{self.catalog_path}/catalogs/{self.catalog_id}"
         return dict(
             rel=Relations.self.value,
             type=MimeTypes.json.value,
-            href=urljoin(self.base_url, f"{self.catalog_path}/catalogs/{self.catalog_id}"),
+            href=urljoin(self.base_url, href_url),
         )
 
     def link_parent(self) -> Dict[str, Any]:
         """Create the `parent` link."""
-        return dict(rel=Relations.parent, type=MimeTypes.json.value, href=self.base_url)
+        if not self.catalog_path:
+            href_url = ""
+        else:
+            href_url = f"catalogs/{self.catalog_path}"
+        return dict(rel=Relations.parent, type=MimeTypes.json.value, href=urljoin(self.base_url, href_url))
 
     def link_collections(self) -> Dict[str, Any]:
         """Create the `collections` link."""
+        if not self.catalog_path:
+            href_url = f"catalogs/{self.catalog_id}"
+        else:
+            href_url = f"catalogs/{self.catalog_path}/catalogs/{self.catalog_id}"
         return dict(
             rel="collections",
             type=MimeTypes.geojson.value,
-            href=urljoin(self.base_url, f"{self.catalog_path}/catalogs/{self.catalog_id}/collections"),
+            href=urljoin(self.base_url, f"{href_url}/collections"),
         )
     
     def link_catalogs(self) -> Dict[str, Any]:
         """Create the `catalogs` link."""
+        if not self.catalog_path:
+            href_url = f"catalogs/{self.catalog_id}"
+        else:
+            href_url = f"catalogs/{self.catalog_path}/catalogs/{self.catalog_id}"
         return dict(
             rel="catalogs",
             type=MimeTypes.geojson.value,
-            href=urljoin(self.base_url, f"{self.catalog_path}/catalogs/{self.catalog_id}/catalogs"),
+            href=urljoin(self.base_url, f"{href_url}/catalogs"),
         )
 
 
     def link_queryables(self) -> Dict[str, Any]:
         """Create the `queryables` link."""
         if "FilterExtension" in self.extensions:
+            if not self.catalog_path:
+                href_url = f"catalogs/{self.catalog_id}"
+            else:
+                href_url = f"catalogs/{self.catalog_path}/catalogs/{self.catalog_id}"
             return dict(
                 rel="queryables",
                 type=MimeTypes.json.value,
                 href=urljoin(
-                    self.base_url, f"{self.catalog_path}/catalogs/{self.catalog_id}/queryables"
-                ),
-            )
-        else:
-            return None
-
-    def link_aggregate(self) -> Dict[str, Any]:
-        """Create the `aggregate` link."""
-        if "AggregationExtension" in self.extensions:
-            return dict(
-                rel="aggregate",
-                type=MimeTypes.json.value,
-                href=urljoin(
-                    self.base_url, f"{self.catalog_path}/catalogs/{self.catalog_id}/aggregate"
-                ),
-            )
-        else:
-            return None
-
-    def link_aggregations(self) -> Dict[str, Any]:
-        """Create the `aggregations` link."""
-        if "AggregationExtension" in self.extensions:
-            return dict(
-                rel="aggregations",
-                type=MimeTypes.json.value,
-                href=urljoin(
-                    self.base_url, f"{self.catalog_path}/catalogs/{self.catalog_id}/aggregations"
+                    self.base_url, f"{href_url}/queryables"
                 ),
             )
         else:
@@ -262,7 +278,12 @@ class PagingLinks(BaseLinks):
         if self.next is not None:
             method = self.request.method
             if method == "GET":
-                href = merge_params(self.url, {"token": self.next})
+                # TODO: This is a hack to get the next link to work
+                parsed_url = urlparse(self.url)
+                netloc = parsed_url.netloc + "/"
+                query_url = self.url.split(netloc)[1]
+                new_url = self.resolve(query_url)
+                href = merge_params(new_url, {"token": self.next})
                 link = dict(
                     rel=Relations.next.value,
                     type=MimeTypes.json.value,
@@ -271,11 +292,16 @@ class PagingLinks(BaseLinks):
                 )
                 return link
             if method == "POST":
+                # TODO: This is a hack to get the next link to work
+                parsed_url = urlparse(self.url)
+                netloc = parsed_url.netloc + "/"
+                query_url = self.url.split(netloc)[1]
+                new_url = self.resolve(query_url)
                 return {
                     "rel": Relations.next,
                     "type": MimeTypes.json,
                     "method": method,
-                    "href": f"{self.request.url}",
+                    "href": f"{new_url}",
                     "body": {**self.request.postbody, "token": self.next},
                 }
 
