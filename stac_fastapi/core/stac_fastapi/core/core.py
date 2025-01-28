@@ -260,8 +260,6 @@ class CoreClient(AsyncBaseCoreClient):
         base_url = str(request.base_url)
         workspaces = auth_headers.get("X-Workspaces", [])
         user_is_authenticated = auth_headers.get("X-Authenticated", False)
-        limit = int(request.query_params.get("limit", 10))
-        token = request.query_params.get("token")
         search = self.database.make_search()
 
         if cat_path:
@@ -294,7 +292,6 @@ class CoreClient(AsyncBaseCoreClient):
         if q:
             search = self.database.apply_keyword_collections_filter(search=search, q=q)
 
-        limit = 10
         if limit:
             limit = limit
 
@@ -330,7 +327,13 @@ class CoreClient(AsyncBaseCoreClient):
             next_link = PagingLinks(next=next_token, request=request).link_next()
             links.append(next_link)
 
-        return stac_types.Collections(collections=collections, links=links)
+        return stac_types.Collections(
+            type="Collections",
+            features=collections,
+            links=links,
+            numReturned=len(collections),
+            numMatched=maybe_count,
+        )
 
 
     async def get_collection(
@@ -373,13 +376,18 @@ class CoreClient(AsyncBaseCoreClient):
         base_url = str(request.base_url)
         limit = int(request.query_params.get("limit", 10))
         token = request.query_params.get("token")
+        print(f"Token is {token}")
 
+        # If root_only we only want the top-level catalogs returned
         if not cat_path and root_only:
             cat_path = ""
+            limit = 10_000
 
-        catalogs, next_token = await self.database.get_all_catalogs(
+        catalogs, maybe_count, next_token = await self.database.get_all_catalogs(
             cat_path=cat_path, token=token, limit=limit, request=request, workspaces=workspaces,
         )
+
+        print(f"next token is {next_token}")
 
         if not cat_path:
             parent_href_url = ""
@@ -402,7 +410,12 @@ class CoreClient(AsyncBaseCoreClient):
             next_link = PagingLinks(next=next_token, request=request).link_next()
             links.append(next_link)
 
-        return stac_types.Catalogs(catalogs=catalogs, links=links)
+        return stac_types.Catalogs(
+            catalogs=catalogs, 
+            links=links,
+            numReturned=len(catalogs),
+            numMatched=maybe_count
+        )
 
     async def get_catalog(
         self, catalog_id: str, auth_headers: dict, cat_path: Optional[str]=None,  **kwargs
@@ -1419,7 +1432,6 @@ class EsAsyncCollectionSearchClient(AsyncBaseCollectionSearchClient):
             q = search_request.q
             search = self.database.apply_keyword_collections_filter(search=search, q=q)
 
-        limit = 10
         if search_request.limit:
             limit = search_request.limit
 
