@@ -16,8 +16,6 @@ from stac_pydantic.shared import MimeTypes
 
 def regen_cat_path(hashed_cat_path: str) -> Tuple[str, str]:
         cat_path = hashed_cat_path.replace(",", "/catalogs/")
-        if cat_path:
-            cat_path = "catalogs" + "/" + cat_path
         return cat_path
 
 @attr.s
@@ -261,11 +259,15 @@ class CatalogSerializer(Serializer):
 
         # Add sub catalog and collection links
         for sub_catalog in sub_catalogs:
+            if cat_path:
+                href_url = "catalogs/" + cat_path + "/"
+            else:
+                href_url = ""
             catalog["links"].append(
                 {
                     "rel": "child",
                     "type": MimeTypes.json.value,
-                    "href": urljoin(str(request.base_url), f"{cat_path}/catalogs/{catalog_id}/catalogs/{sub_catalog[0]}"),
+                    "href": urljoin(str(request.base_url), f"{href_url}catalogs/{catalog_id}/catalogs/{sub_catalog[0]}"),
                     "title": sub_catalog[1],
                 }
             )
@@ -274,7 +276,7 @@ class CatalogSerializer(Serializer):
                 {
                     "rel": "child",
                     "type": MimeTypes.json.value,
-                    "href": urljoin(str(request.base_url), f"{cat_path}/catalogs/{catalog_id}/collections/{sub_collection[0]}"),
+                    "href": urljoin(str(request.base_url), f"{href_url}catalogs/{catalog_id}/collections/{sub_collection[0]}"),
                     "title": sub_collection[1],
                 }
             )
