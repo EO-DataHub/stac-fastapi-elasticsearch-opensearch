@@ -15,7 +15,7 @@ from starlette.requests import Request
 from elasticsearch import exceptions, helpers  # type: ignore
 from fastapi import HTTPException
 from stac_fastapi.core.extensions import filter
-from stac_fastapi.core.serializers import CatalogSerializer, CollectionSerializer, ItemSerializer
+from stac_fastapi.core.serializers import CatalogSerializer, CollectionSerializer, ItemSerializer, regen_cat_path
 from stac_fastapi.core.utilities import MAX_LIMIT, bbox2polygon
 from stac_fastapi.elasticsearch.config import AsyncElasticsearchSettings
 from stac_fastapi.elasticsearch.config import (
@@ -210,77 +210,8 @@ ES_COLLECTIONS_MAPPINGS = {
                                             "end": {"type": "date"}}},
             }
             # "analyzer": "edge_ngram_analyzer",
-        }
+        },
     },
-    # "runtime": {
-    #     "collection_start_time": {
-    #         "type": "date",
-    #         "on_script_error": "continue",
-    #         "script": {
-    #             "source": """
-    #             def times = params._source.extent.temporal.interval; 
-    #             def time = times[0][0]; 
-    #             if (time == null) { 
-    #                 def datetime = ZonedDateTime.parse('0000-10-01T00:00:00Z'); 
-    #                 emit(datetime.toInstant().toEpochMilli()); 
-    #             } 
-    #             else { 
-    #                 def datetime = ZonedDateTime.parse(time); 
-    #                 emit(datetime.toInstant().toEpochMilli())
-    #             }"""
-    #         },
-    #     },
-    #     "collection_end_time": {
-    #         "type": "date",
-    #         "on_script_error": "continue",
-    #         "script": {
-    #             "source": """
-    #             def times = params._source.extent.temporal.interval; 
-    #             def time = times[0][1]; 
-    #             if (time == null) { 
-    #                 def datetime = ZonedDateTime.parse('9900-12-01T12:31:12Z'); 
-    #                 emit(datetime.toInstant().toEpochMilli()); 
-    #             } 
-    #             else { 
-    #                 def datetime = ZonedDateTime.parse(time); 
-    #                 emit(datetime.toInstant().toEpochMilli())
-    #             }"""
-    #         },
-    #     },
-    #     "geometry.shape": {
-    #         "type": "keyword",
-    #         "on_script_error": "continue",
-    #         "script": {"source": "emit('Polygon')"},
-    #     },
-    #     "collection_min_lat": {
-    #         "type": "double",
-    #         "on_script_error": "continue",
-    #         "script": {
-    #             "source": "def bbox = params._source.extent.spatial.bbox; emit(bbox[0][0]);"
-    #         },
-    #     },
-    #     "collection_min_lon": {
-    #         "type": "double",
-    #         "on_script_error": "continue",
-    #         "script": {
-    #             "source": "def bbox = params._source.extent.spatial.bbox; emit(bbox[0][1]);"
-    #         },
-    #     },
-    #     "collection_max_lat": {
-    #         "type": "double",
-    #         "on_script_error": "continue",
-    #         "script": {
-    #             "source": "def bbox = params._source.extent.spatial.bbox; emit(bbox[0][2]);"
-    #         },
-    #     },
-    #     "collection_max_lon": {
-    #         "type": "double",
-    #         "on_script_error": "continue",
-    #         "script": {
-    #             "source": "def bbox = params._source.extent.spatial.bbox; emit(bbox[0][3]);"
-    #         },
-    #     },
-    # }
 }
 
 
@@ -445,7 +376,6 @@ async def delete_collection_index(collection_id: str):
     await client.close()
 
 async def delete_catalogs_by_id_prefix(prefix: str, refresh: bool = True):
-    print(f"Deleting catalogs with cat_path {prefix}")
     client = AsyncElasticsearchSettings().create_client
     pattern = f"{prefix}*"
     body={
@@ -457,7 +387,6 @@ async def delete_catalogs_by_id_prefix(prefix: str, refresh: bool = True):
             }
         }
     }
-    print(body)
     response = await client.delete_by_query(
         index=CATALOGS_INDEX,
         body=body,
@@ -466,10 +395,9 @@ async def delete_catalogs_by_id_prefix(prefix: str, refresh: bool = True):
 
     # Print the number of collections deleted
     deleted_count = response.get('deleted', 0)
-    print(f"Number of catalogs deleted: {deleted_count}")
+    logger.info(f"Number of catalogs deleted: {deleted_count}")
 
 async def delete_collections_by_id_prefix(prefix: str, refresh: bool = True):
-    print(f"Deleting collection with cat_path {prefix}")
     client = AsyncElasticsearchSettings().create_client
     pattern = f"{prefix}*"
     body={
@@ -489,10 +417,9 @@ async def delete_collections_by_id_prefix(prefix: str, refresh: bool = True):
 
     # Print the number of collections deleted
     deleted_count = response.get('deleted', 0)
-    print(f"Number of collections deleted: {deleted_count}")
+    logger.info(f"Number of collections deleted: {deleted_count}")
 
 async def delete_items_by_id_prefix(prefix: str, refresh: bool = True):
-    print(f"Deleting items with cat_path {prefix}")
     client = AsyncElasticsearchSettings().create_client
     pattern = f"{prefix}*"
     body={
@@ -511,10 +438,9 @@ async def delete_items_by_id_prefix(prefix: str, refresh: bool = True):
     )
     # Print the number of items deleted
     deleted_count = response.get('deleted', 0)
-    print(f"Number of items deleted: {deleted_count}")
+    logger.info(f"Number of items deleted: {deleted_count}")
 
 async def delete_items_by_id_prefix_and_collection(cat_path: str, collection_id: str, refresh: bool = True):
-    print(f"Deleting items with cat_path {cat_path} and collection_id {collection_id}")
     client = AsyncElasticsearchSettings().create_client
     body = {
         "query": {
@@ -533,7 +459,7 @@ async def delete_items_by_id_prefix_and_collection(cat_path: str, collection_id:
     )
     # Print the number of items deleted
     deleted_count = response.get('deleted', 0)
-    print(f"Number of items deleted: {deleted_count}")
+    logger.info(f"Number of items deleted: {deleted_count}")
 
 
 def mk_item_id(item_id: str, collection_id: str):
@@ -698,7 +624,7 @@ class DatabaseLogic:
         return gen_parent_id, catalog_id
     
     async def update_parent_catalog_access(self, cat_path: str, public: bool):
-        print(f"Updating parent catalog access for {cat_path}")
+        logger.info(f"Updating parent catalog access for {cat_path}")
         # Only called when child is to be set public
         parent_id, catalog_id = self.generate_parent_id(cat_path)
 
@@ -719,7 +645,6 @@ class DatabaseLogic:
             annotations = {"_sfapi_internal": {"inf_public": True,
                                             "count_public_children": count_public}
             }
-            print(f"++ Setting count to {count_public}")
         else:
             # If this catalog has no more public children, set inferred to false
             count_public -= 1
@@ -731,10 +656,9 @@ class DatabaseLogic:
                 annotations = {"_sfapi_internal": {"inf_public": True,
                                             "count_public_children": count_public}
                 }
-            print(f"-- Setting count to {count_public}")
         
 
-        print(f"Updating parent catalog access to be public for {parent_id}")
+        logger.info(f"Updating parent catalog access to be public for {parent_id}")
 
         await self.client.update(
             index=CATALOGS_INDEX,
@@ -776,7 +700,7 @@ class DatabaseLogic:
 
         # Print the count of updates made
         updated_count = response.get('updated', 0)
-        print(f"Number of documents (items) updated: {updated_count}")
+        logger.info(f"Number of documents (items) updated: {updated_count}")
 
     async def update_collection_children_access_items(self, cat_path, collection_id, public):
         query = {
@@ -804,7 +728,7 @@ class DatabaseLogic:
 
         # Print the count of updates made
         updated_count = response.get('updated', 0)
-        print(f"Number of documents (items) updated: {updated_count}")
+        logger.info(f"Number of documents (items) updated: {updated_count}")
 
     async def update_children_access_collections(self, prefix, public):
         pattern = f"{prefix},*"
@@ -832,7 +756,7 @@ class DatabaseLogic:
 
         # Print the count of updates made
         updated_count = response.get('updated', 0)
-        print(f"Number of documents (collections) updated: {updated_count}")
+        logger.info(f"Number of documents (collections) updated: {updated_count}")
 
     async def update_children_access_catalogs(self, prefix, public):
         pattern = f"{prefix},*"
@@ -860,7 +784,7 @@ class DatabaseLogic:
 
         # Print the count of updates made
         updated_count = response.get('updated', 0)
-        print(f"Number of documents (catalogs) updated: {updated_count}")
+        logger.info(f"Number of documents (catalogs) updated: {updated_count}")
 
 
     """CORE LOGIC"""
@@ -1015,12 +939,12 @@ class DatabaseLogic:
         response = await self.client.search(
             index=COLLECTIONS_INDEX,
             sort=[{"id": {"order": "asc"}}],
-            size=10_000, # max allowed in response
+            size=MAX_LIMIT, # max allowed in response
             query=query,
         )
 
         hits = response["hits"]["hits"]
-        collections = [(hit["_source"]["id"], hit["_source"].get("title", hit["_source"]["id"])) for hit in hits]
+        collections = [(hit["_source"]["id"], hit["_source"].get("title", hit["_source"]["id"]), hit["_source"]["_sfapi_internal"]["cat_path"]) for hit in hits]
 
         return collections
     
@@ -1053,12 +977,12 @@ class DatabaseLogic:
         response = await self.client.search(
             index=CATALOGS_INDEX,
             sort=[{"id": {"order": "asc"}}],
-            size=10_000, # max allowed in response
+            size=MAX_LIMIT, # max allowed in response
             query=query,
         )
 
         hits = response["hits"]["hits"]
-        catalogs = [(hit["_source"]["id"], hit["_source"].get("title", hit["_source"]["id"])) for hit in hits]
+        catalogs = [(hit["_source"]["id"], hit["_source"].get("title", hit["_source"]["id"]), hit["_source"]["_sfapi_internal"]["cat_path"]) for hit in hits]
 
         return catalogs
     
@@ -1074,9 +998,12 @@ class DatabaseLogic:
         Returns:
             A tuple of (catalogs, next pagination token if any).
         """
+
         search_after = None
         if token:
             search_after = [token]
+
+        print(f"Search after is {search_after}")
 
         if cat_path:
             if cat_path.endswith("/catalogs"):
@@ -1092,21 +1019,41 @@ class DatabaseLogic:
 
         query = search.query.to_dict() if search.query else None
 
-        response = await self.client.search(
-            index=CATALOGS_INDEX,
-            sort=[{"id": {"order": "asc"}}],
-            search_after=search_after,
-            size=limit,
-            query=query,
+        # Limit size of limit to avoid overloading Elasticsearch
+        max_result_window = MAX_LIMIT
+        size_limit = min(limit + 1, max_result_window)
+
+        search_task = asyncio.create_task(
+            self.client.search(
+                index=CATALOGS_INDEX,
+                sort=[{"id": {"order": "asc"}}],
+                search_after=search_after,
+                size=size_limit,
+                query=query,
+            )
         )
 
-        hits = response["hits"]["hits"]
+        count_task = asyncio.create_task(
+            self.client.count(
+                index=CATALOGS_INDEX,
+                body=search.to_dict(count=True),
+            )
+        )
+
+        try:
+            es_response = await search_task
+        except exceptions.NotFoundError:
+            raise NotFoundError(f"Catalog '{cat_path}' does not exist")
+
+        hits = es_response["hits"]["hits"]
+
         catalogs = []
-        if not cat_path:
-            base_cat_path = ""
-        else:
-            base_cat_path = cat_path + "/catalogs/"
-        for hit in hits:
+        for hit in hits[:limit]:
+            if regen_cat_path(hit["_source"]["_sfapi_internal"]["cat_path"]):
+                base_cat_path = "catalogs/" + regen_cat_path(hit["_source"]["_sfapi_internal"]["cat_path"]) + "/catalogs/"
+            else:
+                # Handle recursive response for "/catalogs"
+                base_cat_path = "catalogs/"
             child_cat_path = base_cat_path + hit["_source"]["id"]
             sub_catalogs = await self.get_all_sub_catalogs(cat_path=child_cat_path, workspaces=workspaces)
             sub_collections = await self.get_all_sub_collections(cat_path=child_cat_path, workspaces=workspaces)
@@ -1117,10 +1064,24 @@ class DatabaseLogic:
             )
 
         next_token = None
-        if len(hits) == limit:
-            next_token = hits[-1]["sort"][0]
+        print(f"Number of hits: {len(hits)}")
+        print(f"Limit: {limit}")
+        if len(hits) > limit and limit < max_result_window:
+            if hits and (hits[limit - 1].get("sort")):
+                next_token = hits[limit - 1]["sort"][0]
 
-        return catalogs, next_token
+        matched = (
+            es_response["hits"]["total"]["value"]
+            if es_response["hits"]["total"]["relation"] == "eq"
+            else None
+        )
+        if count_task.done():
+            try:
+                matched = count_task.result().get("count")
+            except Exception as e:
+                logger.error(f"Count task failed: {e}")
+
+        return catalogs, matched, next_token
 
     async def get_one_item(self, cat_path: str, collection_id: str, item_id: str, workspaces: Optional[List[str]], user_is_authenticated: bool) -> Dict:
         """Retrieve a single item from the database.
@@ -1143,8 +1104,6 @@ class DatabaseLogic:
         gen_cat_path = self.generate_cat_path(cat_path, collection_id)
 
         combi_item_path = gen_cat_path + "||" + item_id
-
-        print(f"Searching for item with id {combi_item_path}")
 
         try:
             item = await self.client.get(
@@ -1785,8 +1744,6 @@ class DatabaseLogic:
             refresh=refresh,
         )
 
-        print(f"Created item with id {combi_item_id}")
-
         if (meta := es_resp.get("meta")) and meta.get("status") == 409:
             raise ConflictError(
                 f"Item {item_id} in collection {collection_id} already exists"
@@ -1868,8 +1825,6 @@ class DatabaseLogic:
             combi_cat_path = gen_cat_path + "||" + catalog_id
         else:
             combi_cat_path = catalog_id
-
-        print(f"Searching for catalog with id {combi_cat_path}")
 
         try:
             catalog = await self.client.get(index=CATALOGS_INDEX, id=combi_cat_path)
@@ -1958,8 +1913,6 @@ class DatabaseLogic:
             document=catalog,
             refresh=refresh,
         )
-
-        print(f"Catalog ID is {combi_catalog_id}")
 
         #await create_collection_index(catalog_id)
 
@@ -2080,7 +2033,7 @@ class DatabaseLogic:
         access_control = prev_catalog.get("_sfapi_internal", {})
         if access_control.get("owner") != workspace:
             raise HTTPException(status_code=403, detail="You do not have permission to update access policy for this catalog")
-        print(f"Updating policy for {combi_cat_path} with {access_policy.get('public', False)}")
+        logger.info(f"Updating policy for {combi_cat_path} with {access_policy.get('public', False)}")
         annotations = {"_sfapi_internal": {"exp_public": access_policy.get("public", False)}}
         if not access_policy.get("public", False):
             # If now setting private, reset inf_public value to False too
@@ -2154,7 +2107,6 @@ class DatabaseLogic:
         access_control = prev_catalog.get("_sfapi_internal", {})
         if access_control.get("owner") != workspace:
             raise HTTPException(status_code=403, detail="You do not have permission to delete catalogs in this catalog")
-        print(f"Deleting combi cat path {combi_cat_path} and gen_cat_path {gen_cat_path}")
         await self.client.delete(
             index=CATALOGS_INDEX, id=combi_cat_path, refresh=refresh
         )
@@ -2183,8 +2135,6 @@ class DatabaseLogic:
 
         gen_cat_path = self.generate_cat_path(cat_path)
         combi_collection_id = gen_cat_path + "||" + collection_id
-
-        print(f"Searching for collection with id {combi_collection_id}")
 
         try:
             collection = await self.client.get(index=COLLECTIONS_INDEX, id=combi_collection_id)
@@ -2278,8 +2228,6 @@ class DatabaseLogic:
             document=collection,
             refresh=refresh,
         )
-
-        print(f"Collection ID is {combi_collection_id}")
 
         # await create_item_index(collection_id)
 
@@ -2393,10 +2341,8 @@ class DatabaseLogic:
             refresh=refresh,
         )
 
-        #  Need to update parent access to ensure access when now public
+        # Need to update parent access to ensure access when now public
         # Only make change if there is a change in access
-        print(access_control.get("exp_public", False))
-        print(access_policy.get("public", False))
         if access_control.get("exp_public", False) != access_policy.get("public", False):
             await self.update_parent_catalog_access(cat_path, access_policy.get("public", False))
         await self.update_collection_children_access_items(cat_path=gen_cat_path, collection_id=collection_id, public=access_policy.get("public", False))
