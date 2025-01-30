@@ -790,13 +790,16 @@ class DatabaseLogic:
     """CORE LOGIC"""
 
     async def get_all_collections(
-        self, cat_path: str, token: Optional[str], limit: int, request: Request, workspaces: Optional[List[str]],
+        self, token: Optional[str], limit: int, request: Request, workspaces: Optional[List[str]], cat_path: Optional[str] = None
     ) -> Tuple[List[Dict[str, Any]], Optional[str]]:
         """Retrieve a list of all collections from Elasticsearch, supporting pagination.
 
         Args:
             token (Optional[str]): The pagination token.
             limit (int): The number of results to return.
+            request (Request): The request object.
+            workspaces (Optional[List[str]]): The list of workspaces to filter by.
+            cat_path (Optional[str]): The catalog path to filter by.
 
         Returns:
             A tuple of (collections, next pagination token if any).
@@ -912,11 +915,12 @@ class DatabaseLogic:
     
     async def get_all_sub_collections(
         self, cat_path: str, workspaces: Optional[List[str]],
-    ) -> Tuple[List[str]]:
-        """Retrieve a list of all collections from Elasticsearch, supporting pagination.
+    ) -> List[str]:
+        """Retrieve a list of all collections from Elasticsearch.
 
         Args:
-            limit (int): The number of results to return.
+            cat_path (str): The catalog path to filter by.
+            workspaces (Optional[List[str]]): The list of workspaces to filter by.
 
         Returns:
             A tuple of (collections, next pagination token if any).
@@ -950,11 +954,12 @@ class DatabaseLogic:
     
     async def get_all_sub_catalogs(
         self, cat_path: str, workspaces: Optional[List[str]]
-    ) -> Tuple[List[str]]:
-        """Retrieve a list of all catalogs from Elasticsearch, supporting pagination.
+    ) -> List[str]:
+        """Retrieve a list of all catalogs from Elasticsearch.
 
         Args:
-            limit (int): The number of results to return.
+            cat_path (str): The catalog path to filter by.
+            workspaces (Optional[List[str]]): The list of workspaces to filter by.
 
         Returns:
             A tuple of (catalogs, next pagination token if any).
@@ -1002,8 +1007,6 @@ class DatabaseLogic:
         search_after = None
         if token:
             search_after = [token]
-
-        print(f"Search after is {search_after}")
 
         if cat_path:
             if cat_path.endswith("/catalogs"):
@@ -1064,8 +1067,6 @@ class DatabaseLogic:
             )
 
         next_token = None
-        print(f"Number of hits: {len(hits)}")
-        print(f"Limit: {limit}")
         if len(hits) > limit and limit < max_result_window:
             if hits and (hits[limit - 1].get("sort")):
                 next_token = hits[limit - 1]["sort"][0]
@@ -1087,8 +1088,11 @@ class DatabaseLogic:
         """Retrieve a single item from the database.
 
         Args:
+            cat_path (str): The catalog path to filter by.
             collection_id (str): The id of the Collection that the Item belongs to.
             item_id (str): The id of the Item.
+            workspaces (Optional[List[str]]): The list of workspaces to filter by.
+            user_is_authenticated (bool): Whether the user is authenticated.
 
         Returns:
             item (Dict): A dictionary containing the source data for the Item.
@@ -1643,7 +1647,6 @@ class DatabaseLogic:
             ConflictError: If the item already exists in the database.
 
         """
-        #await self.check_collection_exists(collection_id=item["collection"])
 
         if not exist_ok and await self.client.exists(
             index=index_by_collection_id(item["collection"]),
@@ -1696,8 +1699,10 @@ class DatabaseLogic:
         """Database logic for creating one item.
 
         Args:
+            cat_path (str): The path of the catalog from the resource path.
             collection_id (str): The id of the collection from the resource path
             item (Item): The item to be created.
+            workspace (str): The workspace of the user creating the item.
             refresh (bool, optional): Refresh the index after performing the operation. Defaults to False.
 
         Raises:
@@ -1755,8 +1760,10 @@ class DatabaseLogic:
         """Delete a single item from the database.
 
         Args:
+            cat_path (str): The path of the catalog from the resource path.
             item_id (str): The id of the Item to be deleted.
             collection_id (str): The id of the Collection that the Item belongs to.
+            workspace (str): The workspace of the user deleting the item.
             refresh (bool, optional): Whether to refresh the index after the deletion. Default is False.
 
         Raises:
@@ -1802,6 +1809,8 @@ class DatabaseLogic:
         Args:
             self: The instance of the object calling this function.
             cat_path (str): The path of the catalog to be found.
+            workspaces (Optional[List[str]]): The list of workspaces to filter by.
+            user_is_authenticated (bool): Whether the user is authenticated.
 
         Returns:
             Catalog: The found catalog, represented as a `Catalog` object.
@@ -1925,6 +1934,8 @@ class DatabaseLogic:
             self: The instance of the object calling this function.
             cat_path (str): The ID of the catalog to be updated.
             catalog (Catalog): The Catalog object to be used for the update.
+            workspace (str): The workspace of the user updating the catalog.
+            refresh (bool, optional): Whether to refresh the index after the update. Default is False.
 
         Raises:
             NotFoundError: If the catalog with the given `cat_path` is not
@@ -1998,8 +2009,10 @@ class DatabaseLogic:
 
         Args:
             self: The instance of the object calling this function.
-            collection_id (str): The ID of the collection to be updated.
-            collection (Collection): The Collection object to be used for the update.
+            cat_path (str): The ID of the catalog to be updated.
+            access_policy (AccessPolicy): The AccessPolicy object to be used for the update.
+            workspace (str): The workspace of the user updating the catalog.
+            refresh (bool): Whether to refresh the index after the update. Default is False.
 
         Raises:
             NotFoundError: If the collection with the given `collection_id` is not
@@ -2073,6 +2086,7 @@ class DatabaseLogic:
         Parameters:
             self: The instance of the object calling this function.
             cat_path (str): The path of the catalog to be deleted.
+            workspace (str): The workspace of the user deleting the catalog.
             refresh (bool): Whether to refresh the index after the deletion (default: False).
 
         Raises:
@@ -2120,7 +2134,10 @@ class DatabaseLogic:
 
         Args:
             self: The instance of the object calling this function.
+            cat_path (str): The path of the catalog from the resource path.
             collection_id (str): The ID of the collection to be found.
+            workspaces (Optional[List[str]]): The list of workspaces to filter by.
+            user_is_authenticated (bool): Whether the user is authenticated.
 
         Returns:
             Collection: The found collection, represented as a `Collection` object.
@@ -2178,7 +2195,9 @@ class DatabaseLogic:
         """Create a single collection in the database.
 
         Args:
+            cat_path (str): The path to the parent catalog.
             collection (Collection): The Collection object to be created.
+            workspace (str): The workspace sending the create request
             refresh (bool, optional): Whether to refresh the index after the creation. Default is False.
 
         Raises:
@@ -2238,8 +2257,11 @@ class DatabaseLogic:
 
         Args:
             self: The instance of the object calling this function.
+            cat_path (str): The path of the catalog from the resource path.
             collection_id (str): The ID of the collection to be updated.
             collection (Collection): The Collection object to be used for the update.
+            workspace (str): The workspace of the user updating the collection.
+            refresh (bool): Whether to refresh the index after the update. Default is False.
 
         Raises:
             NotFoundError: If the collection with the given `collection_id` is not
@@ -2306,8 +2328,10 @@ class DatabaseLogic:
 
         Args:
             self: The instance of the object calling this function.
+            cat_path (str): The path of the catalog from the resource path.
             collection_id (str): The ID of the collection to be updated.
-            collection (Collection): The Collection object to be used for the update.
+            workspace (str): The workspace of the user updating the collection.
+            refresh (bool): Whether to refresh the index after the update. Default is False.
 
         Raises:
             NotFoundError: If the collection with the given `collection_id` is not
@@ -2352,7 +2376,9 @@ class DatabaseLogic:
 
         Parameters:
             self: The instance of the object calling this function.
+            cat_path (str): The path of the catalog from the resource path.
             collection_id (str): The ID of the collection to be deleted.
+            workspace (str): The workspace of the user deleting the collection.
             refresh (bool): Whether to refresh the index after the deletion (default: False).
 
         Raises:
