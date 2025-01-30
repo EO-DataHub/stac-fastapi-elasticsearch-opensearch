@@ -133,7 +133,7 @@ class EsAsyncAggregationClient(AsyncBaseAggregationClient):
         workspaces = auth_headers.get("X-Workspaces", [])
         user_is_authenticated = auth_headers.get("X-Authenticated", False)
 
-        if collection_id is not None:
+        if cat_path is not None and collection_id is not None:
             collection_endpoint = urljoin(base_url, f"catalogs/{cat_path}/collections/{collection_id}")
             links.extend(
                 [
@@ -149,15 +149,33 @@ class EsAsyncAggregationClient(AsyncBaseAggregationClient):
                     },
                 ]
             )
-            # cat_path: str, collection_id: str, workspaces: Optional[List[str]], user_is_authenticated: bool
             if await self.database.check_collection_exists(cat_path, collection_id) is None:
-                print(cat_path)
                 collection = await self.database.find_collection(cat_path=cat_path, collection_id=collection_id, workspaces=workspaces, user_is_authenticated=user_is_authenticated)
                 aggregations = collection.get(
                     "aggregations", self.DEFAULT_AGGREGATIONS.copy()
                 )
             else:
                 raise IndexError(f"Collection {collection_id} does not exist")
+        elif cat_path is not None:
+            catalog_endpoint = urljoin(base_url, f"catalogs/{cat_path}")
+            links.extend(
+                [
+                    {
+                        "rel": "collection",
+                        "type": "application/json",
+                        "href": catalog_endpoint,
+                    },
+                    {
+                        "rel": "self",
+                        "type": "application/json",
+                        "href": urljoin(catalog_endpoint + "/", "aggregations"),
+                    },
+                ]
+            )
+            catalog = await self.database.find_catalog(cat_path=cat_path, workspaces=workspaces, user_is_authenticated=user_is_authenticated)
+            aggregations = catalog.get(
+                "aggregations", self.DEFAULT_AGGREGATIONS.copy()
+            )
         else:
             links.append(
                 {
@@ -455,7 +473,7 @@ class EsAsyncAggregationClient(AsyncBaseAggregationClient):
             # validate that aggregations are supported for all collections
             for collection_id in aggregate_request.collections:
                 aggs = await self.get_aggregations(
-                    collection_id=collection_id, request=request
+                    cat_path=cat_path, collection_id=collection_id, request=request
                 )
                 supported_aggregations = (
                     aggs["aggregations"] + self.DEFAULT_AGGREGATIONS
@@ -469,7 +487,7 @@ class EsAsyncAggregationClient(AsyncBaseAggregationClient):
                         )
         else:
             # Validate that the aggregations requested are supported by the catalog
-            aggs = await self.get_aggregations(request=request)
+            aggs = await self.get_aggregations(cat_path=cat_path, request=request)
             supported_aggregations = aggs["aggregations"]
             for agg_name in aggregate_request.aggregations:
                 if agg_name not in [x["name"] for x in supported_aggregations]:
@@ -559,8 +577,8 @@ class EsAsyncAggregationClient(AsyncBaseAggregationClient):
             {"rel": "root", "type": "application/json", "href": base_url},
         ]
 
-        if collection_id:
-            collection_endpoint = urljoin(base_url, f"collections/{collection_id}")
+        if cat_path and collection_id:
+            collection_endpoint = urljoin(base_url, f"catalogs/{cat_path}/collections/{collection_id}")
             links.extend(
                 [
                     {
@@ -575,6 +593,22 @@ class EsAsyncAggregationClient(AsyncBaseAggregationClient):
                     },
                 ]
             )
+        elif cat_path:
+            catalog_endpoint = urljoin(base_url, f"catalogs/{cat_path}")
+            links.extend(
+                [
+                    {
+                        "rel": "catalog",
+                        "type": "application/json",
+                        "href": catalog_endpoint,
+                    },
+                    {
+                        "rel": "self",
+                        "type": "application/json",
+                        "href": urljoin(catalog_endpoint, "aggregate"),
+                    },
+                ]
+            )
         else:
             links.append(
                 {
@@ -586,5 +620,7 @@ class EsAsyncAggregationClient(AsyncBaseAggregationClient):
         results = AggregationCollection(
             type="AggregationCollection", aggregations=aggs, links=links
         )
+        
+        
 
         return results
