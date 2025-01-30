@@ -1331,9 +1331,11 @@ class BulkTransactionsClient(BaseBulkTransactionsClient):
 class EsAsyncBaseFiltersClient(AsyncBaseFiltersClient):
     """Defines a pattern for implementing the STAC filter extension."""
 
+    database: BaseDatabaseLogic = attr.ib()
+
     # todo: use the ES _mapping endpoint to dynamically find what fields exist
     async def get_queryables(
-        self, cat_path: Optional[str] = None, collection_id: Optional[str] = None, **kwargs
+        self, auth_headers: dict, cat_path: Optional[str] = None, collection_id: Optional[str] = None, **kwargs
     ) -> Dict[str, Any]:
         """Get the queryables available for the given collection_id.
 
@@ -1346,12 +1348,23 @@ class EsAsyncBaseFiltersClient(AsyncBaseFiltersClient):
         https://github.com/radiantearth/stac-api-spec/tree/master/fragments/filter#queryables
 
         Args:
+            auth_headers (dict): The authentication headers.
+            cat_path (str, optional): The path of the parent catalog containing the collection.
             collection_id (str, optional): The id of the collection to get queryables for.
             **kwargs: additional keyword arguments
 
         Returns:
             Dict[str, Any]: A dictionary containing the queryables for the given collection.
         """
+
+        workspaces = auth_headers.get("X-Workspaces", [])
+        user_is_authenticated = auth_headers.get("X-Authenticated", False)
+
+        if cat_path and collection_id:
+            await self.database.find_collection(cat_path=cat_path, collection_id=collection_id, workspaces=workspaces, user_is_authenticated=user_is_authenticated)
+        elif cat_path:
+            await self.database.find_catalog(cat_path=cat_path, workspaces=workspaces, user_is_authenticated=user_is_authenticated)
+
         return {
             "$schema": "https://json-schema.org/draft/2019-09/schema",
             "$id": "https://stac-api.example.com/queryables",
