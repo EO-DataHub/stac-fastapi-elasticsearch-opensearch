@@ -249,6 +249,41 @@ class CatalogLinks(BaseLinks):
             href=urljoin(self.base_url, f"{href_url}/catalogs"),
         )
 
+        
+    def link_aggregate(self) -> Dict[str, Any]:
+        """Create the `aggregate` link."""
+        if "AggregationExtension" in self.extensions:
+            if not self.catalog_path:
+                href_url = f"catalogs/{self.catalog_id}"
+            else:
+                href_url = f"catalogs/{self.catalog_path}/catalogs/{self.catalog_id}"
+            return dict(
+                rel="aggregate",
+                type=MimeTypes.json.value,
+                href=urljoin(
+                    self.base_url, f"{href_url}/aggregate"
+                ),
+            )
+        else:
+            return None
+
+
+    def link_aggregations(self) -> Dict[str, Any]:
+        """Create the `aggregations` link."""
+        if "AggregationExtension" in self.extensions:
+            if not self.catalog_path:
+                href_url = f"catalogs/{self.catalog_id}"
+            else:
+                href_url = f"catalogs/{self.catalog_path}/catalogs/{self.catalog_id}"
+            return dict(
+                rel="aggregations",
+                type=MimeTypes.json.value,
+                href=urljoin(
+                    self.base_url, f"{href_url}/aggregations"
+                ),
+            )
+        else:
+            return None
 
     def link_queryables(self) -> Dict[str, Any]:
         """Create the `queryables` link."""
@@ -261,36 +296,57 @@ class CatalogLinks(BaseLinks):
                 rel="queryables",
                 type=MimeTypes.json.value,
                 href=urljoin(
-                    self.base_url, "queryables"
+                    self.base_url, f"{href_url}/queryables"
                 ),
             )
         else:
             return None
-        
-    def link_aggregate(self) -> Dict[str, Any]:
-        """Create the `aggregate` link."""
-        if "AggregationExtension" in self.extensions:
-            return dict(
-                rel="aggregate",
-                type=MimeTypes.json.value,
-                href=urljoin(
-                    self.base_url, "aggregate"
-                ),
-            )
+
+
+    def link_conformance(self) -> Dict[str, Any]:
+        if not self.catalog_path:
+            href_url = f"catalogs/{self.catalog_id}"
         else:
-            return None
-    def link_aggregations(self) -> Dict[str, Any]:
-        """Create the `aggregations` link."""
-        if "AggregationExtension" in self.extensions:
-            return dict(
-                rel="aggregations",
-                type=MimeTypes.json.value,
-                href=urljoin(
-                    self.base_url, "aggregations"
-                ),
-            )
+            href_url = f"catalogs/{self.catalog_path}/catalogs/{self.catalog_id}"
+        return dict(
+            rel="conformance",
+            type=MimeTypes.json.value,
+            title="STAC/WFS3 conformance classes implemented by this server",
+            href=urljoin(
+                self.base_url, f"{href_url}/conformance"
+            ),
+        )
+    
+
+    def link_get_search(self) -> Dict[str, Any]:
+        if not self.catalog_path:
+            href_url = f"catalogs/{self.catalog_id}"
         else:
-            return None
+            href_url = f"catalogs/{self.catalog_path}/catalogs/{self.catalog_id}"
+        return dict(
+            rel="search",
+            type=MimeTypes.geojson,
+            title="STAC search",
+            href=urljoin(
+                self.base_url, f"{href_url}/search"
+            ),
+            method="GET",
+        )
+    
+    def link_post_search(self) -> Dict[str, Any]:
+        if not self.catalog_path:
+            href_url = f"catalogs/{self.catalog_id}"
+        else:
+            href_url = f"catalogs/{self.catalog_path}/catalogs/{self.catalog_id}"
+        return dict(
+            rel="search",
+            type=MimeTypes.geojson,
+            title="STAC search",
+            href=urljoin(
+                self.base_url, f"{href_url}/search"
+            ),
+            method="POST",
+        )
 
 @attr.s
 class PagingLinks(BaseLinks):
