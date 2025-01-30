@@ -110,7 +110,6 @@ class ItemSerializer(Serializer):
             properties=item.get("properties", {}),
             links=item_links,
             assets=item.get("assets", {}),
-            _sfapi_internal=item.get("_sfapi_internal", {})
         )
 
 
@@ -183,7 +182,7 @@ class CollectionSerializer(Serializer):
         collection["links"] = collection_links
 
         # Pop any unnecessary keys
-        # collection.pop("_sfapi_internal", None)
+        collection.pop("_sfapi_internal", None)
 
         # Return the stac_types.Collection object
         return stac_types.Collection(**collection)
@@ -286,7 +285,7 @@ class CatalogSerializer(Serializer):
             )
 
         # Pop any unnecessary keys
-        # catalog..pop("_sfapi_internal", None)
+        catalog.pop("_sfapi_internal", None)
 
         # Return the stac_types.Catalog object
         return stac_types.Catalog(**catalog)
