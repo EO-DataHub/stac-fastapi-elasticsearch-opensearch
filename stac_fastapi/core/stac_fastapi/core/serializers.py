@@ -272,6 +272,10 @@ class CatalogSerializer(Serializer):
                 }
             )
         for sub_collection in sub_collections:
+            if cat_path:
+                href_url = "catalogs/" + cat_path + "/"
+            else:
+                href_url = ""
             catalog["links"].append(
                 {
                     "rel": "child",
