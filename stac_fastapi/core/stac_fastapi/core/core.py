@@ -163,6 +163,7 @@ class CoreClient(AsyncBaseCoreClient):
         Returns:
             API landing page, serving as an entry point to the API.
         """
+        logger.info("Getting landing page")
         request: Request = kwargs["request"]
         base_url = get_base_url(request)
         landing_page = self._landing_page(
@@ -251,15 +252,24 @@ class CoreClient(AsyncBaseCoreClient):
         """Read all collections from the database.
 
         Args:
+            auth_headers (dict): The authentication headers.
+            cat_path (str): The path of the parent catalog containing the collections.
+            bbox (Optional[BBox]): The bounding box to filter collections by.
+            datetime (Optional[DateTimeType]): The datetime range to filter collections by.
+            limit (Optional[int]): The maximum number of collections to return. The default value is 10.
+            token (Optional[str]): A token used for pagination.
+            q (Optional[List[str]]): A list of free text queries to filter the collections by.
             **kwargs: Keyword arguments from the request.
 
         Returns:
             A Collections object containing all the collections in the database and links to various resources.
         """
+        logger.info("Getting all collections")
         request = kwargs["request"]
         base_url = str(request.base_url)
         workspaces = auth_headers.get("X-Workspaces", [])
         user_is_authenticated = auth_headers.get("X-Authenticated", False)
+        token = request.query_params.get("token")
         search = self.database.make_search()
 
         if cat_path:
@@ -291,9 +301,6 @@ class CoreClient(AsyncBaseCoreClient):
 
         if q:
             search = self.database.apply_keyword_collections_filter(search=search, q=q)
-
-        if limit:
-            limit = limit
 
         collections, maybe_count, next_token = await self.database.execute_collection_search(
             search=search,
@@ -344,6 +351,7 @@ class CoreClient(AsyncBaseCoreClient):
         Args:
             cat_path: The path of the parent catalog containing the specified collection.
             collection_id (str): The id of the collection to retrieve.
+            auth_headers (dict): The authentication headers.
             kwargs: Additional keyword arguments passed to the API call.
 
         Returns:
@@ -352,6 +360,7 @@ class CoreClient(AsyncBaseCoreClient):
         Raises:
             NotFoundError: If the collection with the given id cannot be found in the database.
         """
+        logger.info(f"Getting collection {collection_id}")
         request = kwargs["request"]
         workspaces = auth_headers.get("X-Workspaces", [])
         user_is_authenticated = auth_headers.get("X-Authenticated", False)
@@ -366,17 +375,20 @@ class CoreClient(AsyncBaseCoreClient):
         """Read all catalogs from the database.
 
         Args:
+            auth_headers (dict): The authentication headers.
+            cat_path (str): The path of the parent catalog containing the catalogs.
+            root_only (bool): If True, only the top-level catalogs will be returned.
             **kwargs: Keyword arguments from the request.
 
         Returns:
             A Catalogs object containing all the catalogs in the database and links to various resources.
         """
+        logger.info("Getting all catalogs")
         request = kwargs["request"]
         workspaces = auth_headers.get("X-Workspaces", [])
         base_url = str(request.base_url)
         limit = int(request.query_params.get("limit", 10))
         token = request.query_params.get("token")
-        print(f"Token is {token}")
 
         # If root_only we only want the top-level catalogs returned
         if not cat_path and root_only:
@@ -386,8 +398,6 @@ class CoreClient(AsyncBaseCoreClient):
         catalogs, maybe_count, next_token = await self.database.get_all_catalogs(
             cat_path=cat_path, token=token, limit=limit, request=request, workspaces=workspaces,
         )
-
-        print(f"next token is {next_token}")
 
         if not cat_path:
             parent_href_url = ""
@@ -432,6 +442,7 @@ class CoreClient(AsyncBaseCoreClient):
         Raises:
             NotFoundError: If the catalog with the given path cannot be found in the database.
         """
+        logger.info(f"Getting catalog {catalog_id}")
         request = kwargs["request"]
         workspaces = auth_headers.get("X-Workspaces", [])
         user_is_authenticated = auth_headers.get("X-Authenticated", False)
@@ -464,7 +475,9 @@ class CoreClient(AsyncBaseCoreClient):
         """Read items from a specific collection in the database.
 
         Args:
+            cat_path (str): The path of the parent catalog containing the collection.
             collection_id (str): The identifier of the collection to read items from.
+            auth_headers (dict): The authentication headers.
             bbox (Optional[BBox]): The bounding box to filter items by.
             datetime (Optional[DateTimeType]): The datetime range to filter items by.
             limit (int): The maximum number of items to return. The default value is 10.
@@ -479,6 +492,7 @@ class CoreClient(AsyncBaseCoreClient):
             HTTPException: If the specified collection is not found.
             Exception: If any error occurs while reading the items from the database.
         """
+        logger.info(f"Getting items from collection {collection_id}")
         request: Request = kwargs["request"]
         workspaces = auth_headers.get("X-Workspaces", [])
         token = request.query_params.get("token")
@@ -544,8 +558,10 @@ class CoreClient(AsyncBaseCoreClient):
         """Get an item from the database based on its id and collection id.
 
         Args:
+            cat_path (str): The path of the parent catalog containing the collection.
             collection_id (str): The ID of the collection the item belongs to.
             item_id (str): The ID of the item to be retrieved.
+            auth_headers (dict): The authentication headers.
 
         Returns:
             Item: An `Item` object representing the requested item.
@@ -554,6 +570,7 @@ class CoreClient(AsyncBaseCoreClient):
             Exception: If any error occurs while getting the item from the database.
             NotFoundError: If the item does not exist in the specified collection.
         """
+        logger.info(f"Getting item {item_id} from collection {collection_id}")
         base_url = str(kwargs["request"].base_url)
         workspaces = auth_headers.get("X-Workspaces", [])
         user_is_authenticated = auth_headers.get("X-Authenticated", False)
@@ -655,6 +672,9 @@ class CoreClient(AsyncBaseCoreClient):
         """Get search results from the database.
 
         Args:
+            request (Request): The incoming request.
+            auth_headers (dict): The authentication headers.
+            cat_path (str): The path of the parent catalog containing the collections.
             collections (Optional[List[str]]): List of collection IDs to search in.
             ids (Optional[List[str]]): List of item IDs to search for.
             bbox (Optional[BBox]): Bounding box to search in.
@@ -675,8 +695,7 @@ class CoreClient(AsyncBaseCoreClient):
             HTTPException: If any error occurs while searching the catalog.
         """
 
-        workspaces = auth_headers.get("X-Workspaces", [])
-
+        logger.info("Getting search results")
         base_args = {
             "collections": collections,
             "ids": ids,
@@ -735,6 +754,9 @@ class CoreClient(AsyncBaseCoreClient):
 
         Args:
             search_request (BaseSearchPostRequest): Request object that includes the parameters for the search.
+            request (Request): The incoming request.
+            auth_headers (dict): The authentication headers.
+            cat_path (str): The path of the parent catalog containing the collections.
             kwargs: Keyword arguments passed to the function.
 
         Returns:
@@ -743,7 +765,7 @@ class CoreClient(AsyncBaseCoreClient):
         Raises:
             HTTPException: If there is an error with the cql2_json filter.
         """
-
+        logger.info("Performing POST search")
         workspaces = auth_headers.get("X-Workspaces", [])
         user_is_authenticated = auth_headers.get("X-Authenticated", False)
 
@@ -899,8 +921,10 @@ class TransactionsClient(AsyncBaseTransactionsClient):
         """Create an item in the collection.
 
         Args:
+            cat_path (str): The path of the parent catalog containing the collection.
             collection_id (str): The id of the collection to add the item to.
             item (stac_types.Item): The item to be added to the collection.
+            workspace (str): The workspace making the request.
             kwargs: Additional keyword arguments.
 
         Returns:
@@ -941,9 +965,11 @@ class TransactionsClient(AsyncBaseTransactionsClient):
         """Update an item in the collection.
 
         Args:
+            cat_path (str): The path of the parent catalog containing the collection.
             collection_id (str): The ID of the collection the item belongs to.
             item_id (str): The ID of the item to be updated.
             item (stac_types.Item): The new item data.
+            workspace (str): The workspace making the request.
             kwargs: Other optional arguments, including the request object.
 
         Returns:
@@ -971,8 +997,11 @@ class TransactionsClient(AsyncBaseTransactionsClient):
         """Delete an item from a collection.
 
         Args:
+            cat_path (str): The path of the parent catalog containing the collection.
             item_id (str): The identifier of the item to delete.
             collection_id (str): The identifier of the collection that contains the item.
+            workspace (str): The workspace making the request.
+            kwargs: Additional keyword arguments.
 
         Returns:
             Optional[stac_types.Item]: The deleted item, or `None` if the item was successfully deleted.
@@ -987,7 +1016,9 @@ class TransactionsClient(AsyncBaseTransactionsClient):
         """Create a new collection in the database.
 
         Args:
+            cat_path (str): The path of the parent catalog containing the collections.
             collection (stac_types.Collection): The collection to be created.
+            workspace (str): The workspace making the request.
             kwargs: Additional keyword arguments.
 
         Returns:
@@ -1021,8 +1052,10 @@ class TransactionsClient(AsyncBaseTransactionsClient):
         The updated collection is then returned.
 
         Args:
+            cat_path: The path of the parent catalog containing the collection.
             collection_id: id of the existing collection to be updated
             collection: A STAC collection that needs to be updated.
+            workspace: The workspace making the request.
             kwargs: Additional keyword arguments.
 
         Returns:
@@ -1059,8 +1092,10 @@ class TransactionsClient(AsyncBaseTransactionsClient):
         The updated collection is then returned.
 
         Args:
+            cat_path: The path of the parent catalog containing the collection.
             collection_id: id of the existing collection to be updated
             collection: A STAC collection that needs to be updated.
+            workspace: The workspace making the request.
             kwargs: Additional keyword arguments.
 
         Returns:
@@ -1085,7 +1120,9 @@ class TransactionsClient(AsyncBaseTransactionsClient):
         This method deletes an existing collection in the database.
 
         Args:
+            cat_path (str): The path of the parent catalog containing the collection.
             collection_id (str): The identifier of the collection that contains the item.
+            workspace (str): The workspace making the request.
             kwargs: Additional keyword arguments.
 
         Returns:
@@ -1104,7 +1141,9 @@ class TransactionsClient(AsyncBaseTransactionsClient):
         """Create a new catalog in the database.
 
         Args:
+            cat_path (str): The path of the parent catalog containing the catalogs
             catalog (stac_types.Catalog): The catalog to be created.
+            workspace (str): The workspace making the request.
             kwargs: Additional keyword arguments.
 
         Returns:
@@ -1136,8 +1175,9 @@ class TransactionsClient(AsyncBaseTransactionsClient):
         The updated catalog is then returned.
 
         Args:
-            catalog_id: id of the existing catalog to be updated
+            cat_path: The path of the catalog to update.
             catalog: A STAC catalog that needs to be updated.
+            workspace: The workspace making the request.
             kwargs: Additional keyword arguments.
 
         Returns:
@@ -1174,8 +1214,9 @@ class TransactionsClient(AsyncBaseTransactionsClient):
         The updated collection is then returned.
 
         Args:
-            collection_id: id of the existing collection to be updated
-            collection: A STAC collection that needs to be updated.
+            cat_path: The path of the parent catalog containing the collection.
+            access_policy: The access policy to be updated.
+            workspace: The workspace making the request.
             kwargs: Additional keyword arguments.
 
         Returns:
@@ -1202,7 +1243,8 @@ class TransactionsClient(AsyncBaseTransactionsClient):
         This method deletes an existing catalog in the database.
 
         Args:
-            catalog_id (str): The identifier of the catalog that contains the item.
+            cat_path (str): The path of the parent catalog containing the catalog.
+            workspace (str): The workspace making the request.
             kwargs: Additional keyword arguments.
 
         Returns:
@@ -1291,7 +1333,7 @@ class EsAsyncBaseFiltersClient(AsyncBaseFiltersClient):
 
     # todo: use the ES _mapping endpoint to dynamically find what fields exist
     async def get_queryables(
-        self, cat_path: Optional[str], collection_id: Optional[str] = None, **kwargs
+        self, cat_path: Optional[str] = None, collection_id: Optional[str] = None, **kwargs
     ) -> Dict[str, Any]:
         """Get the queryables available for the given collection_id.
 
@@ -1391,6 +1433,7 @@ class EsAsyncCollectionSearchClient(AsyncBaseCollectionSearchClient):
             A list of collections.
 
         """
+        logger.info("Getting all collections (POST)")
         request = kwargs["request"]
         base_url = str(request.base_url)
         workspaces = auth_headers.get("X-Workspaces", [])
