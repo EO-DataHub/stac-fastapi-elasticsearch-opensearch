@@ -304,16 +304,12 @@ class CatalogLinks(BaseLinks):
 
 
     def link_conformance(self) -> Dict[str, Any]:
-        if not self.catalog_path:
-            href_url = f"catalogs/{self.catalog_id}"
-        else:
-            href_url = f"catalogs/{self.catalog_path}/catalogs/{self.catalog_id}"
         return dict(
             rel="conformance",
             type=MimeTypes.json.value,
             title="STAC/WFS3 conformance classes implemented by this server",
             href=urljoin(
-                self.base_url, f"{href_url}/conformance"
+                self.base_url, "conformance"
             ),
         )
     
