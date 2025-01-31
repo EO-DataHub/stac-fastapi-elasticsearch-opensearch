@@ -335,8 +335,7 @@ class CoreClient(AsyncBaseCoreClient):
             links.append(next_link)
 
         return stac_types.Collections(
-            type="Collections",
-            features=collections,
+            collections=collections,
             links=links,
             numReturned=len(collections),
             numMatched=maybe_count,
@@ -1524,8 +1523,7 @@ class EsAsyncCollectionSearchClient(AsyncBaseCollectionSearchClient):
             links.append(next_link)
 
         return stac_types.Collections(
-            type="Collections",
-            features=collections,
+            collections=collections,
             links=links,
             numReturned=len(collections),
             numMatched=maybe_count,
