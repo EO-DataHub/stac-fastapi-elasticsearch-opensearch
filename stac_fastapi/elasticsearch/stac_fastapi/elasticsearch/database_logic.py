@@ -1873,12 +1873,12 @@ class DatabaseLogic:
         gen_cat_path = self.generate_cat_path(cat_path)
 
         if cat_path == "root":
-            combi_catalog_id = catalog_id
+            combi_cat_path = catalog_id
         else:
             catalog_id = catalog["id"]
-            combi_catalog_id = gen_cat_path + "||" + catalog_id
+            combi_cat_path = gen_cat_path + "||" + catalog_id
 
-        if await self.client.exists(index=CATALOGS_INDEX, id=combi_catalog_id):
+        if await self.client.exists(index=CATALOGS_INDEX, id=combi_cat_path):
             raise ConflictError(f"Catalog {catalog_id} already exists")
         
         parent_catalog = None
@@ -1918,7 +1918,7 @@ class DatabaseLogic:
 
         await self.client.index(
             index=CATALOGS_INDEX,
-            id=combi_catalog_id,
+            id=combi_cat_path,
             document=catalog,
             refresh=refresh,
         )
@@ -1958,7 +1958,7 @@ class DatabaseLogic:
             combi_cat_path = gen_cat_path + "||" + catalog["id"]
         else:
             combi_cat_path = catalog["id"]
-        
+
         try:
             prev_catalog = await self.client.get(index=CATALOGS_INDEX, id=combi_cat_path)
         except exceptions.NotFoundError:
