@@ -14,8 +14,10 @@ from stac_fastapi.types.links import ItemLinks, resolve_links
 from urllib.parse import urljoin
 from stac_pydantic.shared import MimeTypes
 
-def regen_cat_path(hashed_cat_path: str) -> Tuple[str, str]:
-        cat_path = hashed_cat_path.replace(",", "/catalogs/")
+def regen_cat_path(cat_path: str) -> Tuple[str, str]:
+        if cat_path == "root":
+            return ""
+        cat_path = cat_path.replace(",", "/catalogs/")
         return cat_path
 
 @attr.s
