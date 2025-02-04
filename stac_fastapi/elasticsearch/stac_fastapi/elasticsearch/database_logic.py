@@ -51,8 +51,6 @@ ES_INDEX_NAME_UNSUPPORTED_CHARS = {
     ":",
 }
 
-ITEM_INDICES = f"{ITEMS_INDEX}*,-*kibana*,-{COLLECTIONS_INDEX}*"
-
 DEFAULT_SORT = {
     "properties.datetime": {"order": "desc"},
     "id": {"order": "desc"},
@@ -225,24 +223,7 @@ def index_by_collection_id(collection_id: str) -> str:
     Returns:
         str: The index name derived from the collection id.
     """
-    return f"{ITEMS_INDEX_PREFIX}{''.join(c for c in collection_id.lower() if c not in ES_INDEX_NAME_UNSUPPORTED_CHARS)}"
-
-
-def indices(collection_ids: Optional[List[str]]) -> str:
-    """
-    Get a comma-separated string of index names for a given list of collection ids.
-
-    Args:
-        collection_ids: A list of collection ids.
-
-    Returns:
-        A string of comma-separated index names. If `collection_ids` is None, returns the default indices.
-    """
-    if collection_ids is None or collection_ids == []:
-        return ITEM_INDICES
-    else:
-        return ",".join([index_by_collection_id(c) for c in collection_ids])
-
+    return ITEMS_INDEX
 
 async def create_index_templates() -> None:
     """
@@ -312,68 +293,6 @@ async def create_collection_index() -> None:
     )
     await client.close()
 
-
-async def create_item_index(collection_id: str=None):
-    """
-    Create the index for Items. The settings of the index template will be used implicitly.
-
-    Args:
-        collection_id (str): Collection identifier.
-
-    Returns:
-        None
-
-    """
-    client = AsyncElasticsearchSettings().create_client
-    # index_name = index_by_collection_id(collection_id)
-
-    # await client.options(ignore_status=400).indices.create(
-    #     index=f"{index_by_collection_id(collection_id)}-000001",
-    #     aliases={index_name: {}},
-    # )
-    await client.options(ignore_status=400).indices.create(
-        index=f"{ITEMS_INDEX}-000001",
-        aliases={ITEMS_INDEX: {}},
-    )
-    await client.close()
-
-
-async def delete_item_index(collection_id: str):
-    """Delete the index for items in a collection.
-
-    Args:
-        collection_id (str): The ID of the collection whose items index will be deleted.
-    """
-    client = AsyncElasticsearchSettings().create_client
-
-    name = index_by_collection_id(collection_id)
-    resolved = await client.indices.resolve_index(name=name)
-    if "aliases" in resolved and resolved["aliases"]:
-        [alias] = resolved["aliases"]
-        await client.indices.delete_alias(index=alias["indices"], name=alias["name"])
-        await client.indices.delete(index=alias["indices"])
-    else:
-        await client.indices.delete(index=name)
-    await client.close()
-
-
-async def delete_collection_index(collection_id: str):
-    """Delete the index for items in a collection.
-
-    Args:
-        collection_id (str): The ID of the collection whose items index will be deleted.
-    """
-    client = AsyncElasticsearchSettings().create_client
-
-    name = index_by_collection_id(collection_id)
-    resolved = await client.indices.resolve_index(name=name)
-    if "aliases" in resolved and resolved["aliases"]:
-        [alias] = resolved["aliases"]
-        await client.indices.delete_alias(index=alias["indices"], name=alias["name"])
-        await client.indices.delete(index=alias["indices"])
-    else:
-        await client.indices.delete(index=name)
-    await client.close()
 
 async def delete_catalogs_by_id_prefix(prefix: str, refresh: bool = True):
     client = AsyncElasticsearchSettings().create_client
@@ -597,7 +516,7 @@ class DatabaseLogic:
 
     def generate_cat_path(self, cat_path: str, collection_id: str = None) -> str:
         if cat_path == "root":
-            return ""
+            return "root"
         cat_path = cat_path.replace("catalogs/", "")
         if cat_path.endswith("/"):
             cat_path = cat_path[:-1]
@@ -862,7 +781,7 @@ class DatabaseLogic:
 
         query = search.query.to_dict() if search.query else None
 
-        index_param = COLLECTIONS_INDEX #indices(collection_ids)
+        index_param = COLLECTIONS_INDEX
 
         max_result_window = MAX_LIMIT
 
@@ -1503,7 +1422,7 @@ class DatabaseLogic:
 
         query = search.query.to_dict() if search.query else None
 
-        index_param = ITEMS_INDEX #indices(collection_ids)
+        index_param = ITEMS_INDEX
 
         max_result_window = MAX_LIMIT
 
@@ -1558,6 +1477,7 @@ class DatabaseLogic:
 
     async def aggregate(
         self,
+        workspaces: Optional[List[str]],
         cat_path: Optional[str],
         collection_ids: Optional[List[str]],
         aggregations: List[str],
@@ -1572,6 +1492,12 @@ class DatabaseLogic:
     ):
         """Return aggregations of STAC Items."""
         search_body: Dict[str, Any] = {}
+
+        search = self.apply_access_filter(search=search, workspaces=workspaces)
+
+        if cat_path:
+            search = self.apply_catalogs_filter(search=search, catalog_path=cat_path)
+
         query = search.query.to_dict() if search.query else None
         if query:
             search_body["query"] = query
@@ -1603,7 +1529,7 @@ class DatabaseLogic:
             if k in aggregations
         }
 
-        index_param = indices(collection_ids)
+        index_param = ITEMS_INDEX
         search_task = asyncio.create_task(
             self.client.search(
                 index=index_param,
@@ -1974,8 +1900,8 @@ class DatabaseLogic:
             new_combi_collection_id = gen_cat_path + collection["id"]
             await self.client.reindex(
                 body={
-                    "dest": {"index": f"{ITEMS_INDEX_PREFIX}"},
-                    "source": {"index": f"{ITEMS_INDEX_PREFIX}"},
+                    "dest": {"index": f"{ITEMS_INDEX}"},
+                    "source": {"index": f"{ITEMS_INDEX}"},
                     "script": {
                         "lang": "painless",
                         "source": f"""ctx._id = ctx._id.replace('{collection_id}', '{collection["id"]}'); ctx._source.collection = '{collection["id"]}' ;""",
@@ -2094,8 +2020,7 @@ class DatabaseLogic:
 
         Notes:
             This function first verifies that the catalog with the specified `cat_path` exists in the database, and then
-            deletes the catalog. If `refresh` is set to True, the index is refreshed after the deletion. Additionally, this
-            function also calls `delete_item_index` to delete the index for the items in the catalog.
+            deletes the catalog. If `refresh` is set to True, the index is refreshed after the deletion.
         """
 
         if cat_path.count("/") > 0:
@@ -2291,8 +2216,8 @@ class DatabaseLogic:
             new_combi_collection_id = gen_cat_path + collection["id"]
             await self.client.reindex(
                 body={
-                    "dest": {"index": f"{ITEMS_INDEX_PREFIX}"},
-                    "source": {"index": f"{ITEMS_INDEX_PREFIX}"},
+                    "dest": {"index": f"{ITEMS_INDEX}"},
+                    "source": {"index": f"{ITEMS_INDEX}"},
                     "script": {
                         "lang": "painless",
                         "source": f"""ctx._id = ctx._id.replace('{collection_id}', '{collection["id"]}'); ctx._source.collection = '{collection["id"]}' ;""",
@@ -2386,8 +2311,7 @@ class DatabaseLogic:
 
         Notes:
             This function first verifies that the collection with the specified `collection_id` exists in the database, and then
-            deletes the collection. If `refresh` is set to True, the index is refreshed after the deletion. Additionally, this
-            function also calls `delete_item_index` to delete the index for the items in the collection.
+            deletes the collection. If `refresh` is set to True, the index is refreshed after the deletion.
         """
 
         gen_cat_path = self.generate_cat_path(cat_path)
@@ -2406,7 +2330,6 @@ class DatabaseLogic:
         await self.client.delete(
             index=COLLECTIONS_INDEX, id=combi_collection_id, refresh=refresh
         )
-        # await delete_item_index(combi_collection_id)
 
         await delete_items_by_id_prefix_and_collection(gen_cat_path, collection_id)
 
@@ -2460,19 +2383,58 @@ class DatabaseLogic:
         )
 
     # DANGER
-    async def delete_items(self) -> None:
+    async def delete_items(self, cat_path: str) -> None:
         """Danger. this is only for tests."""
+        pattern = f"{cat_path}*"
+        body={
+            "query": {
+                "wildcard": {
+                    "_sfapi_internal.cat_path": {
+                        "value": pattern
+                    }
+                }
+            }
+        }
         await self.client.delete_by_query(
-            index=ITEM_INDICES,
-            body={"query": {"match_all": {}}},
+            index=ITEMS_INDEX,
+            body=body,
             wait_for_completion=True,
         )
 
     # DANGER
-    async def delete_collections(self) -> None:
+    async def delete_collections(self, cat_path: str) -> None:
         """Danger. this is only for tests."""
+        pattern = f"{cat_path}*"
+        body={
+            "query": {
+                "wildcard": {
+                    "_sfapi_internal.cat_path": {
+                        "value": pattern
+                    }
+                }
+            }
+        }
         await self.client.delete_by_query(
             index=COLLECTIONS_INDEX,
-            body={"query": {"match_all": {}}},
+            body=body,
+            wait_for_completion=True,
+        )
+
+    # DANGER
+    async def delete_catalogs(self, cat_path: str) -> None:
+        """Danger. this is only for tests."""
+        pattern = f"{cat_path}*"
+        body={
+            "query": {
+                "wildcard": {
+                    "_sfapi_internal.cat_path": {
+                        "value": pattern
+                    }
+                }
+            }
+        }
+        await self.client.delete_by_query(
+            index=CATALOGS_INDEX,
+            body=body,
             wait_for_completion=True,
         )
