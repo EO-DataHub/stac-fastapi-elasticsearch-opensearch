@@ -13,10 +13,6 @@ WORKDIR /app
 
 COPY . /app
 
-RUN pip install stac-fastapi.types git+https://github.com/EO-DataHub/eodhp-stac-fastapi.git@feature/EODHP-851-refactor-fastapi-to-reduce-number-of-indices#subdirectory=stac_fastapi/types
-RUN pip install stac-fastapi.api git+https://github.com/EO-DataHub/eodhp-stac-fastapi.git@feature/EODHP-851-refactor-fastapi-to-reduce-number-of-indices#subdirectory=stac_fastapi/api
-RUN pip install stac-fastapi.extensions git+https://github.com/EO-DataHub/eodhp-stac-fastapi.git@feature/EODHP-851-refactor-fastapi-to-reduce-number-of-indices#subdirectory=stac_fastapi/extensions
-
 RUN pip install --no-cache-dir -e ./stac_fastapi/core
 RUN pip install --no-cache-dir ./stac_fastapi/elasticsearch[server]
 

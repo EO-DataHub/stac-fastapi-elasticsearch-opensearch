@@ -10,9 +10,9 @@ install_requires = [
     "attrs>=23.2.0",
     "pydantic[dotenv]",
     "stac_pydantic>=3",
-    # "stac-fastapi.types @ git+https://github.com/EO-DataHub/eodhp-stac-fastapi.git@feature/EODHP-851-refactor-fastapi-to-reduce-number-of-indices#subdirectory=stac_fastapi/types",
-    # "stac-fastapi.api @ git+https://github.com/EO-DataHub/eodhp-stac-fastapi.git@feature/EODHP-851-refactor-fastapi-to-reduce-number-of-indices#subdirectory=stac_fastapi/api",
-    # "stac-fastapi.extensions @ git+https://github.com/EO-DataHub/eodhp-stac-fastapi.git@feature/EODHP-851-refactor-fastapi-to-reduce-number-of-indices#subdirectory=stac_fastapi/extensions"
+    "stac-fastapi.types @ git+https://github.com/EO-DataHub/eodhp-stac-fastapi.git@feature/EODHP-851-refactor-fastapi-to-reduce-number-of-indices#subdirectory=stac_fastapi/types",
+    "stac-fastapi.api @ git+https://github.com/EO-DataHub/eodhp-stac-fastapi.git@feature/EODHP-851-refactor-fastapi-to-reduce-number-of-indices#subdirectory=stac_fastapi/api",
+    "stac-fastapi.extensions @ git+https://github.com/EO-DataHub/eodhp-stac-fastapi.git@feature/EODHP-851-refactor-fastapi-to-reduce-number-of-indices#subdirectory=stac_fastapi/extensions",
     "orjson",
     "overrides",
     "geojson-pydantic",
