@@ -2370,7 +2370,7 @@ class EsAsyncCollectionSearchClient(AsyncCollectionSearchClient):
             search = self.database.apply_keyword_collections_filter(search=search, q=q)
         
         if search_request.filter:
-            search = self.database.apply_filter_collections_filter(search=search, filter=search_request.filter)
+            search = self.database.apply_cql2_filter_for_themes(search=search, filter=search_request.filter)
 
         sort = None
 

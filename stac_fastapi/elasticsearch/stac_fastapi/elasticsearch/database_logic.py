@@ -1465,6 +1465,45 @@ class DatabaseLogic:
         return search
 
     @staticmethod
+    def apply_cql2_filter_for_themes(search: Search, filter: Optional[Dict[str, Any]]) -> Search:
+        """Applies CQL2 filter for themes, handling nested fields correctly.
+
+        Args:
+            search (Search): The search object to apply the filter to.
+            filter (Dict[str, Any], optional): The CQL2 filter criteria.
+
+        Returns:
+            Search: The search object with the filter applied.
+        """
+        if not filter:
+            return search
+
+        # Extract operator and arguments
+        op = filter.get("op")
+        args = filter.get("args", [])
+
+        # Validate filter structure
+        if len(args) != 2 or not isinstance(args[0], dict) or "property" not in args[0]:
+            return search  # Return unmodified search if filter is invalid
+
+        field = args[0]["property"]
+        value = args[1]
+
+        # Check if the field is in "themes.concepts"
+        if field.startswith("themes.concepts."):
+            return search.query(
+                Q("nested", path="themes.concepts", query=Q("term", **{field: value}))
+            )
+
+        # Handle general cases
+        if op == "=":
+            return search.filter("term", **{field: value})
+        elif op in {"gt", "gte", "lt", "lte"}:
+            return search.filter("range", **{field: {op: value}})
+
+        return search  # Return original search if op is unsupported
+    
+    @staticmethod
     def apply_cql2_filter(search: Search, _filter: Optional[Dict[str, Any]]):
         """Database logic to perform query for search endpoint."""
         if _filter is not None:
