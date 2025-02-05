@@ -3,6 +3,7 @@
 import asyncio
 import logging
 import os
+import json
 from base64 import urlsafe_b64decode, urlsafe_b64encode
 from typing import Any, Dict, Iterable, List, Optional, Protocol, Tuple, Type, Union
 
@@ -1465,18 +1466,25 @@ class DatabaseLogic:
         return search
 
     @staticmethod
-    def apply_cql2_filter_for_themes(search: Search, filter: Optional[Dict[str, Any]]) -> Search:
+    def apply_cql2_filter_for_themes(search: Search, filter: Optional[Union[str, Dict[str, Any]]]) -> Search:
         """Applies CQL2 filter for themes, handling nested fields correctly.
 
         Args:
             search (Search): The search object to apply the filter to.
-            filter (Dict[str, Any], optional): The CQL2 filter criteria.
+            filter (Union[str, Dict[str, Any]], optional): The CQL2 filter criteria. May be a JSON string.
 
         Returns:
             Search: The search object with the filter applied.
         """
         if not filter:
             return search
+
+        # Ensure `filter` is a dictionary (handle JSON string case)
+        if isinstance(filter, str):
+            try:
+                filter = json.loads(filter)  # Convert JSON string to dictionary
+            except json.JSONDecodeError:
+                return search  # If JSON decoding fails, return search unmodified
 
         # Extract operator and arguments
         op = filter.get("op")
