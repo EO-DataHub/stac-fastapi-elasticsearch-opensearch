@@ -1467,45 +1467,33 @@ class DatabaseLogic:
 
     @staticmethod
     def apply_cql2_filter_for_themes(search: Search, filter: Optional[Union[str, Dict[str, Any]]]) -> Search:
-        """Applies CQL2 filter for themes, handling nested fields correctly."""
+        """Applies CQL2 filter for themes, handling both JSON strings and dictionaries."""
 
         if not filter:
             return search
 
-        # Convert filter from JSON string if needed
+        # Convert JSON string to dict if necessary
         if isinstance(filter, str):
             try:
-                filter = filter.strip()
-                filter = json.loads(filter)  
-                print(f"Converted filter: {filter}")
+                filter = json.loads(filter.strip())
             except json.JSONDecodeError:
-                return search  
+                return search
+        elif not isinstance(filter, dict):
+            return search
 
         # Extract the actual filter object
-        actual_filter = filter.get("filter", {})
-
-        # Extract operator and arguments
-        op = actual_filter.get("op")
-        args = actual_filter.get("args", [])
+        actual_filter = filter.get("filter", filter)
+        op, args = actual_filter.get("op"), actual_filter.get("args", [])
 
         # Validate filter structure
-        if len(args) != 2 or not isinstance(args[0], dict) or "property" not in args[0]:
-            return search  
+        if op != "=" or len(args) != 2 or not isinstance(args[0], dict) or "property" not in args[0]:
+            return search
 
-        field = args[0]["property"]
-        value = args[1]
+        # Extract field and value for the query
+        field, value = args[0]["property"], args[1]
 
-        # Build the query using the `Q` syntax
-        search = search.query(
-            Q(
-                "bool", 
-                must=[
-                    Q("term", **{field: value})
-                ]
-            )
-        )
-        print(f"Constructed Query: {json.dumps(search.to_dict(), indent=2)}")
-        return search
+        # Build and return the Elasticsearch query
+        return search.query(Q("bool", must=[Q("term", **{field: value})]))
     
     @staticmethod
     def apply_cql2_filter(search: Search, _filter: Optional[Dict[str, Any]]):
