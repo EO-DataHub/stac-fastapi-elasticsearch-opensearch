@@ -2429,6 +2429,7 @@ class EsAsyncCollectionSearchClient(AsyncCollectionSearchClient):
         datetime: Optional[Union[str, datetime_type]] = None,
         limit: Optional[int] = 10,
         q: Optional[List[str]] = None,
+        filter: Optional[List[str]] = None,
         **kwargs,
     ) -> Collections:
         """Get search results from the database for collections.
@@ -2458,6 +2459,7 @@ class EsAsyncCollectionSearchClient(AsyncCollectionSearchClient):
             "bbox": bbox,
             "datetime": datetime,
             "q": q,
+            "filter": filter
         }
 
         # Do the request
