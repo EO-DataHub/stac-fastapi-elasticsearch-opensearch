@@ -1472,20 +1472,20 @@ class DatabaseLogic:
         if not filter:
             return search
 
-        print(f"Before conversion Filter: {filter}")
-        print(f"Type of filter: {type(filter)}")
+        logger.info(f"Before conversion Filter: {filter}")
+        logger.info(f"Type of filter: {type(filter)}")
 
         # Convert filter from JSON string if needed
         if isinstance(filter, str):
             try:
                 filter = filter.strip()
                 filter = json.loads(filter)  # Convert JSON string to dictionary
-                print(f"Converted filter from string: {filter}")
+                logger.info(f"Converted filter from string: {filter}")
             except json.JSONDecodeError as e:
-                print(f"JSON decode error: {e}")
+                logger.info(f"JSON decode error: {e}")
                 return search
         elif not isinstance(filter, dict):
-            print(f"Invalid filter type: {type(filter)}")
+            logger.info(f"Invalid filter type: {type(filter)}")
             return search
 
         # Check if there's a 'filter' key at the top level
@@ -1495,19 +1495,19 @@ class DatabaseLogic:
         op = actual_filter.get("op")
         args = actual_filter.get("args", [])
 
-        print(f"op: {op}")
-        print(f"args: {args}")
+        logger.info(f"op: {op}")
+        logger.info(f"args: {args}")
 
         # Validate filter structure
         if len(args) != 2 or not isinstance(args[0], dict) or "property" not in args[0]:
-            print("Invalid filter structure.")
+            logger.info("Invalid filter structure.")
             return search  
 
         field = args[0]["property"]
         value = args[1]
 
-        print(f"field: {field}")
-        print(f"value: {value}")
+        logger.info(f"field: {field}")
+        logger.info(f"value: {value}")
 
         # Build the query using the Q syntax
         search = search.query(
@@ -1519,7 +1519,7 @@ class DatabaseLogic:
             )
         )
 
-        print(f"Constructed Query: {json.dumps(search.to_dict(), indent=2)}")
+        logger.info(f"Constructed Query: {json.dumps(search.to_dict(), indent=2)}")
         return search
     
     @staticmethod
