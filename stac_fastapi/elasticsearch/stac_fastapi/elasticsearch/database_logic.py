@@ -1467,49 +1467,45 @@ class DatabaseLogic:
 
     @staticmethod
     def apply_cql2_filter_for_themes(search: Search, filter: Optional[Union[str, Dict[str, Any]]]) -> Search:
-        """Applies CQL2 filter for themes, handling nested fields correctly.
+        """Applies CQL2 filter for themes, handling nested fields correctly."""
 
-        Args:
-            search (Search): The search object to apply the filter to.
-            filter (Union[str, Dict[str, Any]], optional): The CQL2 filter criteria. May be a JSON string.
-
-        Returns:
-            Search: The search object with the filter applied.
-        """
         if not filter:
             return search
 
-        # Ensure `filter` is a dictionary (handle JSON string case)
+        # Convert filter from JSON string if needed
         if isinstance(filter, str):
             try:
-                filter = json.loads(filter)  # Convert JSON string to dictionary
+                filter = filter.strip()
+                filter = json.loads(filter)  
+                print(f"Converted filter: {filter}")
             except json.JSONDecodeError:
-                return search  # If JSON decoding fails, return search unmodified
+                return search  
+
+        # Extract the actual filter object
+        actual_filter = filter.get("filter", {})
 
         # Extract operator and arguments
-        op = filter.get("op")
-        args = filter.get("args", [])
+        op = actual_filter.get("op")
+        args = actual_filter.get("args", [])
 
         # Validate filter structure
         if len(args) != 2 or not isinstance(args[0], dict) or "property" not in args[0]:
-            return search  # Return unmodified search if filter is invalid
+            return search  
 
         field = args[0]["property"]
         value = args[1]
 
-        # Check if the field is in "themes.concepts"
-        if field.startswith("themes.concepts."):
-            return search.query(
-                Q("nested", path="themes.concepts", query=Q("term", **{field: value}))
+        # Build the query using the `Q` syntax
+        search = search.query(
+            Q(
+                "bool", 
+                must=[
+                    Q("term", **{field: value})
+                ]
             )
-
-        # Handle general cases
-        if op == "=":
-            return search.filter("term", **{field: value})
-        elif op in {"gt", "gte", "lt", "lte"}:
-            return search.filter("range", **{field: {op: value}})
-
-        return search  # Return original search if op is unsupported
+        )
+        print(f"Constructed Query: {json.dumps(search.to_dict(), indent=2)}")
+        return search
     
     @staticmethod
     def apply_cql2_filter(search: Search, _filter: Optional[Dict[str, Any]]):
