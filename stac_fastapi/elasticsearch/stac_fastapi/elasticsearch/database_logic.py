@@ -293,6 +293,22 @@ async def create_collection_index() -> None:
     )
     await client.close()
 
+async def create_item_index(collection_id: str=None):
+    """
+    Create the index for Items. The settings of the index template will be used implicitly.
+    Args:
+        collection_id (str): Collection identifier.
+    Returns:
+        None
+    """
+    client = AsyncElasticsearchSettings().create_client
+
+    await client.options(ignore_status=400).indices.create(
+        index=f"{ITEMS_INDEX}-000001",
+        aliases={ITEMS_INDEX: {}},
+    )
+    await client.close()
+
 
 async def delete_catalogs_by_id_prefix(prefix: str, refresh: bool = True):
     client = AsyncElasticsearchSettings().create_client
