@@ -11,6 +11,7 @@ install_requires = [
     "elasticsearch-dsl==8.11.0",
     "uvicorn",
     "starlette",
+    "requests",
 ]
 
 extra_reqs = {

@@ -13,21 +13,28 @@ from elasticsearch_dsl import Q, Search
 from starlette.requests import Request
 
 from elasticsearch import exceptions, helpers  # type: ignore
+from fastapi import HTTPException
 from stac_fastapi.core.extensions import filter
-from stac_fastapi.core.serializers import CollectionSerializer, ItemSerializer
+from stac_fastapi.core.serializers import CatalogSerializer, CollectionSerializer, ItemSerializer, regen_cat_path
 from stac_fastapi.core.utilities import MAX_LIMIT, bbox2polygon
 from stac_fastapi.elasticsearch.config import AsyncElasticsearchSettings
 from stac_fastapi.elasticsearch.config import (
     ElasticsearchSettings as SyncElasticsearchSettings,
 )
+from stac_fastapi.types.access_policy import AccessPolicy
 from stac_fastapi.types.errors import ConflictError, NotFoundError
-from stac_fastapi.types.stac import Collection, Item
+from stac_fastapi.types.stac import Catalog, Collection, Item
 
 logger = logging.getLogger(__name__)
 
 NumType = Union[float, int]
 
+ADMIN_WORKSPACE = os.getenv("ADMIN_WORKSPACE", "default_workspace")
+USER_WRITEABLE_CATALOG = os.getenv("USER_WRITEABLE_CATALOG", "user-datasets")
+
+CATALOGS_INDEX = os.getenv("STAC_CATALOGS_INDEX", "catalogs")
 COLLECTIONS_INDEX = os.getenv("STAC_COLLECTIONS_INDEX", "collections")
+ITEMS_INDEX = os.getenv("STAC_ITEMS_INDEX", "items")
 ITEMS_INDEX_PREFIX = os.getenv("STAC_ITEMS_INDEX_PREFIX", "items_")
 ES_INDEX_NAME_UNSUPPORTED_CHARS = {
     "\\",
@@ -44,18 +51,55 @@ ES_INDEX_NAME_UNSUPPORTED_CHARS = {
     ":",
 }
 
-ITEM_INDICES = f"{ITEMS_INDEX_PREFIX}*,-*kibana*,-{COLLECTIONS_INDEX}*"
-
 DEFAULT_SORT = {
     "properties.datetime": {"order": "desc"},
     "id": {"order": "desc"},
     "collection": {"order": "desc"},
 }
 
+DEFAULT_COLLECTION_SORT = {
+    "id": {"order": "desc"},
+}
+
 ES_ITEMS_SETTINGS = {
     "index": {
         "sort.field": list(DEFAULT_SORT.keys()),
         "sort.order": [v["order"] for v in DEFAULT_SORT.values()],
+    },
+    "analysis": {
+        "tokenizer": {
+            "edge_ngram_tokenizer": {
+                "type": "edge_ngram",
+                "min_gram": 1,
+                "max_gram": 20,
+                "token_chars": ["letter", "digit"],
+            }
+        },
+        "analyzer": {
+            "edge_ngram_analyzer": {
+                "type": "custom",
+                "tokenizer": "edge_ngram_tokenizer",
+            }
+        }
+    }
+}
+
+ES_COLLECTIONS_SETTINGS = {
+    "analysis": {
+        "tokenizer": {
+            "edge_ngram_tokenizer": {
+                "type": "edge_ngram",
+                "min_gram": 1,
+                "max_gram": 20,
+                "token_chars": ["letter", "digit"],
+            }
+        },
+        "analyzer": {
+            "edge_ngram_analyzer": {
+                "type": "custom",
+                "tokenizer": "edge_ngram_tokenizer",
+            }
+        }
     }
 }
 
@@ -129,6 +173,15 @@ ES_ITEMS_MAPPINGS = {
                 "sat:relative_orbit": {"type": "integer"},
             },
         },
+        "_sfapi_internal": {
+            "type": "object",
+            "properties": {
+                "cat_path": {"type": "keyword"},
+                "owner": {"type": "keyword"},
+                "public": {"type": "boolean"},
+            }
+            # "analyzer": "edge_ngram_analyzer",
+        }
     },
 }
 
@@ -142,6 +195,20 @@ ES_COLLECTIONS_MAPPINGS = {
         "providers": {"type": "object", "enabled": False},
         "links": {"type": "object", "enabled": False},
         "item_assets": {"type": "object", "enabled": False},
+        "keywords": {"type": "keyword"},
+        "_sfapi_internal": {
+            "type": "object",
+            "properties": {
+                "cat_path": {"type": "keyword"},
+                "owner": {"type": "keyword"},
+                "public": {"type": "boolean"},
+                "geometry": {"type": "geo_shape"},
+                "datetime": {"type": "object", 
+                             "properties": {"start": {"type": "date"},
+                                            "end": {"type": "date"}}},
+            }
+            # "analyzer": "edge_ngram_analyzer",
+        },
     },
 }
 
@@ -156,24 +223,7 @@ def index_by_collection_id(collection_id: str) -> str:
     Returns:
         str: The index name derived from the collection id.
     """
-    return f"{ITEMS_INDEX_PREFIX}{''.join(c for c in collection_id.lower() if c not in ES_INDEX_NAME_UNSUPPORTED_CHARS)}"
-
-
-def indices(collection_ids: Optional[List[str]]) -> str:
-    """
-    Get a comma-separated string of index names for a given list of collection ids.
-
-    Args:
-        collection_ids: A list of collection ids.
-
-    Returns:
-        A string of comma-separated index names. If `collection_ids` is None, returns the default indices.
-    """
-    if collection_ids is None or collection_ids == []:
-        return ITEM_INDICES
-    else:
-        return ",".join([index_by_collection_id(c) for c in collection_ids])
-
+    return ITEMS_INDEX
 
 async def create_index_templates() -> None:
     """
@@ -185,22 +235,47 @@ async def create_index_templates() -> None:
     """
     client = AsyncElasticsearchSettings().create_client
     await client.indices.put_template(
-        name=f"template_{COLLECTIONS_INDEX}",
+        name=f"template_{CATALOGS_INDEX}",
         body={
-            "index_patterns": [f"{COLLECTIONS_INDEX}*"],
+            "index_patterns": [f"{CATALOGS_INDEX}*"],
+            "settings": ES_COLLECTIONS_SETTINGS,
             "mappings": ES_COLLECTIONS_MAPPINGS,
         },
     )
     await client.indices.put_template(
-        name=f"template_{ITEMS_INDEX_PREFIX}",
+        name=f"template_{COLLECTIONS_INDEX}",
         body={
-            "index_patterns": [f"{ITEMS_INDEX_PREFIX}*"],
+            "index_patterns": [f"{COLLECTIONS_INDEX}*"],
+            "settings": ES_COLLECTIONS_SETTINGS,
+            "mappings": ES_COLLECTIONS_MAPPINGS,
+        },
+    )
+    await client.indices.put_template(
+        name=f"template_{ITEMS_INDEX}",
+        body={
+            "index_patterns": [f"{ITEMS_INDEX}*"],
             "settings": ES_ITEMS_SETTINGS,
             "mappings": ES_ITEMS_MAPPINGS,
         },
     )
     await client.close()
 
+
+async def create_catalog_index() -> None:
+    """
+    Create the index for a Catalog. The settings of the index template will be used implicitly.
+
+    Returns:
+        None
+
+    """
+    client = AsyncElasticsearchSettings().create_client
+
+    await client.options(ignore_status=400).indices.create(
+        index=f"{CATALOGS_INDEX}-000001",
+        aliases={CATALOGS_INDEX: {}},
+    )
+    await client.close()
 
 async def create_collection_index() -> None:
     """
@@ -219,44 +294,91 @@ async def create_collection_index() -> None:
     await client.close()
 
 
-async def create_item_index(collection_id: str):
-    """
-    Create the index for Items. The settings of the index template will be used implicitly.
-
-    Args:
-        collection_id (str): Collection identifier.
-
-    Returns:
-        None
-
-    """
+async def delete_catalogs_by_id_prefix(prefix: str, refresh: bool = True):
     client = AsyncElasticsearchSettings().create_client
-    index_name = index_by_collection_id(collection_id)
-
-    await client.options(ignore_status=400).indices.create(
-        index=f"{index_by_collection_id(collection_id)}-000001",
-        aliases={index_name: {}},
+    pattern = f"{prefix}*"
+    body={
+        "query": {
+            "wildcard": {
+                "_sfapi_internal.cat_path": {
+                    "value": pattern
+                }
+            }
+        }
+    }
+    response = await client.delete_by_query(
+        index=CATALOGS_INDEX,
+        body=body,
+        refresh=refresh  # Ensure the index is refreshed after deletion
     )
-    await client.close()
 
+    # Print the number of collections deleted
+    deleted_count = response.get('deleted', 0)
+    logger.info(f"Number of catalogs deleted: {deleted_count}")
 
-async def delete_item_index(collection_id: str):
-    """Delete the index for items in a collection.
-
-    Args:
-        collection_id (str): The ID of the collection whose items index will be deleted.
-    """
+async def delete_collections_by_id_prefix(prefix: str, refresh: bool = True):
     client = AsyncElasticsearchSettings().create_client
+    pattern = f"{prefix}*"
+    body={
+        "query": {
+            "wildcard": {
+                "_sfapi_internal.cat_path": {
+                    "value": pattern
+                }
+            }
+        }
+    }
+    response = await client.delete_by_query(
+        index=COLLECTIONS_INDEX,
+        body=body,
+        refresh=refresh  # Ensure the index is refreshed after deletion
+    )
 
-    name = index_by_collection_id(collection_id)
-    resolved = await client.indices.resolve_index(name=name)
-    if "aliases" in resolved and resolved["aliases"]:
-        [alias] = resolved["aliases"]
-        await client.indices.delete_alias(index=alias["indices"], name=alias["name"])
-        await client.indices.delete(index=alias["indices"])
-    else:
-        await client.indices.delete(index=name)
-    await client.close()
+    # Print the number of collections deleted
+    deleted_count = response.get('deleted', 0)
+    logger.info(f"Number of collections deleted: {deleted_count}")
+
+async def delete_items_by_id_prefix(prefix: str, refresh: bool = True):
+    client = AsyncElasticsearchSettings().create_client
+    pattern = f"{prefix}*"
+    body={
+        "query": {
+            "wildcard": {
+                "_sfapi_internal.cat_path": {
+                    "value": pattern
+                }
+            }
+        }
+    }
+    response = await client.delete_by_query(
+        index=ITEMS_INDEX,
+        body=body,
+        refresh=refresh  # Ensure the index is refreshed after deletion
+    )
+    # Print the number of items deleted
+    deleted_count = response.get('deleted', 0)
+    logger.info(f"Number of items deleted: {deleted_count}")
+
+async def delete_items_by_id_prefix_and_collection(cat_path: str, collection_id: str, refresh: bool = True):
+    client = AsyncElasticsearchSettings().create_client
+    body = {
+        "query": {
+            "bool": {
+                "must": [
+                    {"term": {"_sfapi_internal.cat_path": cat_path}},
+                    {"term": {"collection": collection_id}}
+                ]
+            } 
+        }    
+    }
+    response = await client.delete_by_query(
+        index=ITEMS_INDEX,
+        body=body,
+        refresh=refresh  # Ensure the index is refreshed after deletion
+    )
+    # Print the number of items deleted
+    deleted_count = response.get('deleted', 0)
+    logger.info(f"Number of items deleted: {deleted_count}")
 
 
 def mk_item_id(item_id: str, collection_id: str):
@@ -315,6 +437,7 @@ class DatabaseLogic:
     collection_serializer: Type[CollectionSerializer] = attr.ib(
         default=CollectionSerializer
     )
+    catalog_serializer: Type[CatalogSerializer] = attr.ib(default=CatalogSerializer)
 
     extensions: List[str] = attr.ib(default=attr.Factory(list))
 
@@ -389,16 +512,213 @@ class DatabaseLogic:
         },
     }
 
+    """Utils"""
+
+    def generate_cat_path(self, cat_path: str, collection_id: str = None) -> str:
+        if cat_path == "root":
+            return "root"
+        cat_path = cat_path.replace("catalogs/", "")
+        if cat_path.endswith("/"):
+            cat_path = cat_path[:-1]
+        cat_path = cat_path.replace("/", ",")
+        if collection_id:
+            cat_path = f"{cat_path}|{collection_id}"
+        return cat_path
+
+    def generate_parent_id(self, cat_path: str) -> Tuple[str, str]:
+        if cat_path.endswith("/"):
+            cat_path = cat_path[:-1]
+        if cat_path.count("/") > 0:
+            cat_path, catalog_id = cat_path.rsplit("/", 1)
+            cat_path = cat_path + "/"
+        else:
+            catalog_id = cat_path
+            cat_path = ""
+
+        gen_cat_path = self.generate_cat_path(cat_path)
+        if gen_cat_path:
+            gen_parent_id = f"{gen_cat_path}||{catalog_id}"
+        else:
+            gen_parent_id = catalog_id
+        return gen_parent_id, catalog_id
+    
+    async def update_parent_catalog_access(self, cat_path: str, public: bool):
+        logger.info(f"Updating parent catalog access for {cat_path}")
+        # Only called when child is to be set public
+        parent_id, catalog_id = self.generate_parent_id(cat_path)
+
+        # Get parent catalog
+        try:
+            parent_catalog = await self.client.get(index=CATALOGS_INDEX, id=parent_id)
+        except exceptions.NotFoundError:
+            raise NotFoundError(f"Catalog {catalog_id} not found")
+        parent_catalog = parent_catalog["_source"]
+
+        inf_public = parent_catalog.get("_sfapi_internal", {}).get("inf_public", False)
+        count_public = parent_catalog.get("_sfapi_internal", {}).get("count_public_children", 0)
+
+        annotations = {}
+
+        if public:
+            count_public += 1
+            annotations = {"_sfapi_internal": {"inf_public": True,
+                                            "count_public_children": count_public}
+            }
+        else:
+            # If this catalog has no more public children, set inferred to false
+            count_public -= 1
+            if count_public == 0:
+                annotations = {"_sfapi_internal": {"inf_public": False,
+                                            "count_public_children": count_public}
+                }
+            else:
+                annotations = {"_sfapi_internal": {"inf_public": True,
+                                            "count_public_children": count_public}
+                }
+        
+
+        logger.info(f"Updating parent catalog access to be public for {parent_id}")
+
+        await self.client.update(
+            index=CATALOGS_INDEX,
+            id=parent_id,
+            body={"doc": annotations},
+            refresh=True,
+        )
+
+        if cat_path.count("/") > 0:
+            # Update parent catalog access only if there is a change in the inferred public status
+            if inf_public != public:
+                # Extract catalog path to parent catalog
+                cat_path = cat_path.rsplit("/", 1)[0][:-9]
+                await self.update_parent_catalog_access(cat_path, public)
+
+    async def update_children_access_items(self, prefix, public):
+        pattern = f"{prefix},*"
+        query = {
+            "query": {
+                "wildcard": {
+                    "_sfapi_internal.cat_path": {
+                        "value": pattern
+                    }
+                }
+            },
+            "script": {
+                "source": f"ctx._source._sfapi_internal.exp_public = params.exp_public",
+                "params": {
+                    "exp_public": public
+                }
+            }
+        }
+
+        response = await self.client.update_by_query(
+            index=ITEMS_INDEX,
+            body=query,
+            refresh=True  # Ensure the index is refreshed after the update
+        )
+
+        # Print the count of updates made
+        updated_count = response.get('updated', 0)
+        logger.info(f"Number of documents (items) updated: {updated_count}")
+
+    async def update_collection_children_access_items(self, cat_path, collection_id, public):
+        query = {
+            "query": {
+                "bool": {
+                    "must": [
+                        {"term": {"_sfapi_internal.cat_path": cat_path}},
+                        {"term": {"collection": collection_id}}
+                    ]
+                } 
+            },
+            "script": {
+                "source": f"ctx._source._sfapi_internal.exp_public = params.exp_public",
+                "params": {
+                    "exp_public": public
+                }
+            }
+        }
+
+        response = await self.client.update_by_query(
+            index=ITEMS_INDEX,
+            body=query,
+            refresh=True  # Ensure the index is refreshed after the update
+        )
+
+        # Print the count of updates made
+        updated_count = response.get('updated', 0)
+        logger.info(f"Number of documents (items) updated: {updated_count}")
+
+    async def update_children_access_collections(self, prefix, public):
+        pattern = f"{prefix},*"
+        query = {
+            "query": {
+                "wildcard": {
+                    "_sfapi_internal.cat_path": {
+                        "value": pattern
+                    }
+                }
+            },
+            "script": {
+                "source": f"ctx._source._sfapi_internal.exp_public = params.exp_public",
+                "params": {
+                    "exp_public": public
+                }
+            }
+        }
+
+        response = await self.client.update_by_query(
+            index=COLLECTIONS_INDEX,
+            body=query,
+            refresh=True  # Ensure the index is refreshed after the update
+        )
+
+        # Print the count of updates made
+        updated_count = response.get('updated', 0)
+        logger.info(f"Number of documents (collections) updated: {updated_count}")
+
+    async def update_children_access_catalogs(self, prefix, public):
+        pattern = f"{prefix},*"
+        query = {
+            "query": {
+                "wildcard": {
+                    "_sfapi_internal.cat_path": {
+                        "value": pattern
+                    }
+                }
+            },
+            "script": {
+                "source": f"ctx._source._sfapi_internal.exp_public = params.exp_public",
+                "params": {
+                    "exp_public": public
+                }
+            }
+        }
+
+        response = await self.client.update_by_query(
+            index=CATALOGS_INDEX,
+            body=query,
+            refresh=True  # Ensure the index is refreshed after the update
+        )
+
+        # Print the count of updates made
+        updated_count = response.get('updated', 0)
+        logger.info(f"Number of documents (catalogs) updated: {updated_count}")
+
+
     """CORE LOGIC"""
 
     async def get_all_collections(
-        self, token: Optional[str], limit: int, request: Request
+        self, token: Optional[str], limit: int, request: Request, workspaces: Optional[List[str]], cat_path: Optional[str] = None
     ) -> Tuple[List[Dict[str, Any]], Optional[str]]:
         """Retrieve a list of all collections from Elasticsearch, supporting pagination.
 
         Args:
             token (Optional[str]): The pagination token.
             limit (int): The number of results to return.
+            request (Request): The request object.
+            workspaces (Optional[List[str]]): The list of workspaces to filter by.
+            cat_path (Optional[str]): The catalog path to filter by.
 
         Returns:
             A tuple of (collections, next pagination token if any).
@@ -407,13 +727,20 @@ class DatabaseLogic:
         if token:
             search_after = [token]
 
+        search = self.make_search()
+        search = self.apply_access_filter(search=search, workspaces=workspaces)
+
+        if cat_path != None:
+            search = self.apply_catalogs_filter(search=search, catalog_path=cat_path)
+            
+        query = search.query.to_dict() if search.query else None
+
         response = await self.client.search(
             index=COLLECTIONS_INDEX,
-            body={
-                "sort": [{"id": {"order": "asc"}}],
-                "size": limit,
-                "search_after": search_after,
-            },
+            sort=[{"id": {"order": "asc"}}],
+            search_after=search_after,
+            size=limit,
+            query=query,
         )
 
         hits = response["hits"]["hits"]
@@ -429,13 +756,262 @@ class DatabaseLogic:
             next_token = hits[-1]["sort"][0]
 
         return collections, next_token
+    
+    async def execute_collection_search(
+        self,
+        search: Search,
+        limit: int,
+        token: Optional[str],
+        sort: Optional[Dict[str, Dict[str, str]]],
+        ignore_unavailable: bool = True,
+    ) -> Tuple[List[Dict[str, Any]], Optional[str]]:
+        """Retrieve a list of all collections from Elasticsearch, supporting pagination.
 
-    async def get_one_item(self, collection_id: str, item_id: str) -> Dict:
+        Args:
+            token (Optional[str]): The pagination token.
+            limit (int): The number of results to return.
+
+        Returns:
+            A tuple of (collections, next pagination token if any).
+        """
+        search_after = None
+
+        if token:
+            search_after = json.loads(urlsafe_b64decode(token).decode())
+
+        query = search.query.to_dict() if search.query else None
+
+        index_param = COLLECTIONS_INDEX
+
+        max_result_window = MAX_LIMIT
+
+        size_limit = min(limit + 1, max_result_window)
+
+        search_task = asyncio.create_task(
+            self.client.search(
+                index=index_param,
+                ignore_unavailable=ignore_unavailable,
+                query=query,
+                sort=sort or DEFAULT_COLLECTION_SORT,
+                search_after=search_after,
+                size=size_limit,
+            )
+        )
+
+        count_task = asyncio.create_task(
+            self.client.count(
+                index=index_param,
+                ignore_unavailable=ignore_unavailable,
+                body=search.to_dict(count=True),
+            )
+        )
+
+        try:
+            es_response = await search_task
+        except exceptions.NotFoundError:
+            raise NotFoundError(f"Catalog does not exist")
+
+        hits = es_response["hits"]["hits"]
+        collections = (hit["_source"] for hit in hits[:limit])
+
+        next_token = None
+        if len(hits) > limit and limit < max_result_window:
+            if hits and (sort_array := hits[limit - 1].get("sort")):
+                next_token = urlsafe_b64encode(json.dumps(sort_array).encode()).decode()
+
+        matched = (
+            es_response["hits"]["total"]["value"]
+            if es_response["hits"]["total"]["relation"] == "eq"
+            else None
+        )
+        if count_task.done():
+            try:
+                matched = count_task.result().get("count")
+            except Exception as e:
+                logger.error(f"Count task failed: {e}")
+
+        return collections, matched, next_token
+    
+    async def get_all_sub_collections(
+        self, cat_path: str, workspaces: Optional[List[str]],
+    ) -> List[str]:
+        """Retrieve a list of all collections from Elasticsearch.
+
+        Args:
+            cat_path (str): The catalog path to filter by.
+            workspaces (Optional[List[str]]): The list of workspaces to filter by.
+
+        Returns:
+            A tuple of (collections, next pagination token if any).
+        """
+
+        if cat_path:
+            if cat_path.endswith("/catalogs"):
+                cat_path = cat_path.rsplit("/", 1)[0]
+            elif cat_path.endswith("catalogs"):
+                cat_path = ""
+
+        search = self.make_search()
+        search = self.apply_access_filter(search=search, workspaces=workspaces)
+
+        if cat_path != None:
+            search = self.apply_catalogs_filter(search=search, catalog_path=cat_path)
+            
+        query = search.query.to_dict() if search.query else None
+
+        response = await self.client.search(
+            index=COLLECTIONS_INDEX,
+            sort=[{"id": {"order": "asc"}}],
+            size=MAX_LIMIT, # max allowed in response
+            query=query,
+        )
+
+        hits = response["hits"]["hits"]
+        collections = [(hit["_source"]["id"], hit["_source"].get("title", hit["_source"]["id"]), hit["_source"]["_sfapi_internal"]["cat_path"]) for hit in hits]
+
+        return collections
+    
+    async def get_all_sub_catalogs(
+        self, cat_path: str, workspaces: Optional[List[str]]
+    ) -> List[str]:
+        """Retrieve a list of all catalogs from Elasticsearch.
+
+        Args:
+            cat_path (str): The catalog path to filter by.
+            workspaces (Optional[List[str]]): The list of workspaces to filter by.
+
+        Returns:
+            A tuple of (catalogs, next pagination token if any).
+        """
+
+        if cat_path:
+            if cat_path.endswith("/catalogs"):
+                cat_path = cat_path.rsplit("/", 1)[0]
+            elif cat_path.endswith("catalogs"):
+                cat_path = ""
+
+        search = self.make_search()
+        search = self.apply_access_filter(search=search, workspaces=workspaces)
+
+        if cat_path != None:
+            search = self.apply_catalogs_filter(search=search, catalog_path=cat_path)
+
+        query = search.query.to_dict() if search.query else None
+
+        response = await self.client.search(
+            index=CATALOGS_INDEX,
+            sort=[{"id": {"order": "asc"}}],
+            size=MAX_LIMIT, # max allowed in response
+            query=query,
+        )
+
+        hits = response["hits"]["hits"]
+        catalogs = [(hit["_source"]["id"], hit["_source"].get("title", hit["_source"]["id"]), hit["_source"]["_sfapi_internal"]["cat_path"]) for hit in hits]
+
+        return catalogs
+    
+    async def get_all_catalogs(
+        self, cat_path: Optional[str], token: Optional[str], limit: int, request: Request, workspaces: Optional[List[str]]
+    ) -> Tuple[List[Dict[str, Any]], Optional[str]]:
+        """Retrieve a list of all catalogs from Elasticsearch, supporting pagination.
+
+        Args:
+            token (Optional[str]): The pagination token.
+            limit (int): The number of results to return.
+
+        Returns:
+            A tuple of (catalogs, next pagination token if any).
+        """
+
+        search_after = None
+        if token:
+            search_after = [token]
+
+        if cat_path:
+            if cat_path.endswith("/catalogs"):
+                cat_path = cat_path.rsplit("/", 1)[0]
+            elif cat_path.endswith("catalogs"):
+                cat_path = ""
+
+        search = self.make_search()
+        search = self.apply_access_filter(search=search, workspaces=workspaces)
+
+        if cat_path != None: # need to include "" cat path to only return top-level catalogs
+            search = self.apply_catalogs_filter(search=search, catalog_path=cat_path)
+
+        query = search.query.to_dict() if search.query else None
+
+        # Limit size of limit to avoid overloading Elasticsearch
+        max_result_window = MAX_LIMIT
+        size_limit = min(limit + 1, max_result_window)
+
+        search_task = asyncio.create_task(
+            self.client.search(
+                index=CATALOGS_INDEX,
+                sort=[{"id": {"order": "asc"}}],
+                search_after=search_after,
+                size=size_limit,
+                query=query,
+            )
+        )
+
+        count_task = asyncio.create_task(
+            self.client.count(
+                index=CATALOGS_INDEX,
+                body=search.to_dict(count=True),
+            )
+        )
+
+        try:
+            es_response = await search_task
+        except exceptions.NotFoundError:
+            raise NotFoundError(f"Catalog '{cat_path}' does not exist")
+
+        hits = es_response["hits"]["hits"]
+
+        catalogs = []
+        for hit in hits[:limit]:
+            if regen_cat_path(hit["_source"]["_sfapi_internal"]["cat_path"]):
+                base_cat_path = "catalogs/" + regen_cat_path(hit["_source"]["_sfapi_internal"]["cat_path"]) + "/catalogs/"
+            else:
+                # Handle recursive response for "/catalogs"
+                base_cat_path = "catalogs/"
+            child_cat_path = base_cat_path + hit["_source"]["id"]
+            sub_catalogs = await self.get_all_sub_catalogs(cat_path=child_cat_path, workspaces=workspaces)
+            sub_collections = await self.get_all_sub_collections(cat_path=child_cat_path, workspaces=workspaces)
+            catalogs.append(
+                self.catalog_serializer.db_to_stac(
+                    catalog=hit["_source"], sub_catalogs=sub_catalogs, sub_collections=sub_collections, request=request, extensions=self.extensions
+                )
+            )
+
+        next_token = None
+        if len(hits) > limit and limit < max_result_window:
+            if hits and (hits[limit - 1].get("sort")):
+                next_token = hits[limit - 1]["sort"][0]
+
+        matched = (
+            es_response["hits"]["total"]["value"]
+            if es_response["hits"]["total"]["relation"] == "eq"
+            else None
+        )
+        if count_task.done():
+            try:
+                matched = count_task.result().get("count")
+            except Exception as e:
+                logger.error(f"Count task failed: {e}")
+
+        return catalogs, matched, next_token
+
+    async def get_one_item(self, cat_path: str, collection_id: str, item_id: str, workspaces: Optional[List[str]], user_is_authenticated: bool) -> Dict:
         """Retrieve a single item from the database.
 
         Args:
+            cat_path (str): The catalog path to filter by.
             collection_id (str): The id of the Collection that the Item belongs to.
             item_id (str): The id of the Item.
+            workspaces (Optional[List[str]]): The list of workspaces to filter by.
+            user_is_authenticated (bool): Whether the user is authenticated.
 
         Returns:
             item (Dict): A dictionary containing the source data for the Item.
@@ -447,16 +1023,33 @@ class DatabaseLogic:
             The Item is retrieved from the Elasticsearch database using the `client.get` method,
             with the index for the Collection as the target index and the combined `mk_item_id` as the document id.
         """
+
+        gen_cat_path = self.generate_cat_path(cat_path, collection_id)
+
+        combi_item_path = gen_cat_path + "||" + item_id
+
         try:
             item = await self.client.get(
-                index=index_by_collection_id(collection_id),
-                id=mk_item_id(item_id, collection_id),
+                index=ITEMS_INDEX,
+                id=combi_item_path,
             )
+            item = item["_source"]
         except exceptions.NotFoundError:
             raise NotFoundError(
                 f"Item {item_id} does not exist in Collection {collection_id}"
             )
-        return item["_source"]
+        
+        ## Check user has access
+        access_control = item.get("_sfapi_internal", {})
+        if not access_control.get("exp_public", False) and not access_control.get("inf_public", False):
+            if not user_is_authenticated:
+                raise HTTPException(status_code=401, detail="User is not authenticated")
+            for workspace in workspaces:
+                if workspace == access_control.get("owner", ""):
+                    return item_id
+            raise HTTPException(status_code=403, detail="User is not authorized to access this item")
+
+        return item
 
     @staticmethod
     def make_search():
@@ -472,6 +1065,24 @@ class DatabaseLogic:
     def apply_collections_filter(search: Search, collection_ids: List[str]):
         """Database logic to search a list of STAC collection ids."""
         return search.filter("terms", collection=collection_ids)
+    
+    def apply_catalogs_filter(self, search: Search, catalog_path: str):
+        """Database logic to search STAC catalog path."""
+        cat_path = self.generate_cat_path(catalog_path)
+        return search.filter("term", **{"_sfapi_internal.cat_path": cat_path})
+    
+    @staticmethod
+    def apply_access_filter(search: Search, workspaces: List[str]):
+        """Database logic to search by access control."""
+        # search = search.filter("term", **{"_sfapi_internal.public": True})
+        # search = search.filter("term", **{"_sfapi_internal.owner": workspace})
+        or_condition = Q("term", **{"_sfapi_internal.exp_public": True}) | Q("term", **{"_sfapi_internal.inf_public": True})
+        for workspace in workspaces:
+            or_condition = or_condition | Q("term", **{"_sfapi_internal.owner": workspace})
+
+        # Apply the OR condition to the search
+        search = search.query(or_condition)
+        return search
 
     @staticmethod
     def apply_datetime_filter(search: Search, datetime_search):
@@ -495,6 +1106,87 @@ class DatabaseLogic:
             search = search.filter(
                 "range", properties__datetime={"gte": datetime_search["gte"]}
             )
+        return search
+
+    @staticmethod
+    def apply_datetime_collections_filter(search: Search, datetime_search):
+        """Apply a filter to search collections based on datetime field.
+
+        Args:
+            search (Search): The search object to filter.
+            datetime_search (dict): The datetime filter criteria.
+
+        Returns:
+            Search: The filtered search object.
+        """
+        if "eq" in datetime_search:
+            search = search.filter(
+                "range", **{"_sfapi_internal.datetime.start": {"lte": datetime_search["eq"]}}
+            )
+            search = search.filter(
+                "range", **{"_sfapi_internal.datetime.end": {"gte": datetime_search["eq"]}}
+            )
+        elif datetime_search["lte"] == None:
+            search = search.filter(
+                "range", **{"_sfapi_internal.datetime.end": {"gte": datetime_search["gte"]}}
+            )
+        elif datetime_search["gte"] == None:
+            search = search.filter(
+                "range", **{"_sfapi_internal.datetime.start": {"lte": datetime_search["lte"]}}
+            )
+        else:
+            should = []
+            should.extend(
+                [
+                    Q(
+                        "bool",
+                        filter=[
+                            Q(
+                                "range",
+                                **{"_sfapi_internal.datetime.start":{
+                                    "lte": datetime_search["lte"],
+                                    "gte": datetime_search["gte"],
+                                },
+                                }
+                            ),
+                        ],
+                    ),
+                    Q(
+                        "bool",
+                        filter=[
+                            Q(
+                                "range",
+                                **{"_sfapi_internal.datetime.end":{
+                                    "lte": datetime_search["lte"],
+                                    "gte": datetime_search["gte"],
+                                    },
+                                }
+                            ),
+                        ],
+                    ),
+                    Q(
+                        "bool",
+                        filter=[
+                            Q(
+                                "range",
+                                **{"_sfapi_internal.datetime.start":{
+                                    "lte": datetime_search["gte"],
+                                },
+                                }
+                            ),
+                            Q(
+                                "range",
+                                **{"_sfapi_internal.datetime.end":{
+                                    "gte": datetime_search["lte"],
+                                },
+                                }
+                            ),
+                        ],
+                    ),
+                ]
+            )
+            search = search.query(Q("bool", filter=[Q("bool", should=should)]))
+
         return search
 
     @staticmethod
@@ -527,6 +1219,71 @@ class DatabaseLogic:
                 }
             )
         )
+    
+    @staticmethod
+    def apply_bbox_collections_filter(search: Search, bbox: List):
+        """Filter collections search results based on bounding box.
+
+        Args:
+            search (Search): The search object to apply the filter to.
+            bbox (List): The bounding box coordinates, represented as a list of four values [minx, miny, maxx, maxy].
+
+        Returns:
+            search (Search): The search object with the bounding box filter applied.
+        """
+
+        return search.filter(
+            Q(
+                {
+                    "geo_shape": {
+                        "_sfapi_internal.geometry": {
+                            "shape": {
+                                "type": "polygon",
+                                "coordinates": bbox2polygon(*bbox),
+                            },
+                            "relation": "intersects",
+                        }
+                    }
+                }
+            )
+        )
+
+    @staticmethod
+    def apply_keyword_collections_filter(search: Search, q: List[str]):
+        q_str = ",".join(q)
+        should = []
+        should.extend(
+            [
+                Q(
+                    "bool",
+                    filter=[
+                        Q(
+                            "match",
+                            title={"query": q_str},
+                        ),
+                    ],
+                ),
+                Q(
+                    "bool",
+                    filter=[
+                        Q(
+                            "match",
+                            description={"query": q_str},
+                        ),
+                    ],
+                ),
+                Q(
+                    "bool",
+                    filter=[
+                        Q("terms", keywords=q),
+                    ],
+                ),
+            ]
+        )
+
+        search = search.query(Q("bool", filter=[Q("bool", should=should)]))
+
+        return search
 
     @staticmethod
     def apply_intersects_filter(
@@ -665,7 +1422,7 @@ class DatabaseLogic:
 
         query = search.query.to_dict() if search.query else None
 
-        index_param = indices(collection_ids)
+        index_param = ITEMS_INDEX
 
         max_result_window = MAX_LIMIT
 
@@ -720,6 +1477,8 @@ class DatabaseLogic:
 
     async def aggregate(
         self,
+        workspaces: Optional[List[str]],
+        cat_path: Optional[str],
         collection_ids: Optional[List[str]],
         aggregations: List[str],
         search: Search,
@@ -733,6 +1492,12 @@ class DatabaseLogic:
     ):
         """Return aggregations of STAC Items."""
         search_body: Dict[str, Any] = {}
+
+        search = self.apply_access_filter(search=search, workspaces=workspaces)
+
+        if cat_path:
+            search = self.apply_catalogs_filter(search=search, catalog_path=cat_path)
+
         query = search.query.to_dict() if search.query else None
         if query:
             search_body["query"] = query
@@ -764,7 +1529,7 @@ class DatabaseLogic:
             if k in aggregations
         }
 
-        index_param = indices(collection_ids)
+        index_param = ITEMS_INDEX
         search_task = asyncio.create_task(
             self.client.search(
                 index=index_param,
@@ -782,9 +1547,12 @@ class DatabaseLogic:
 
     """ TRANSACTION LOGIC """
 
-    async def check_collection_exists(self, collection_id: str):
+    async def check_collection_exists(self, cat_path: str, collection_id: str):
         """Database logic to check if a collection exists."""
-        if not await self.client.exists(index=COLLECTIONS_INDEX, id=collection_id):
+        gen_cat_path = self.generate_cat_path(cat_path)
+        combi_collection_id = gen_cat_path + "||" + collection_id
+
+        if not await self.client.exists(index=COLLECTIONS_INDEX, id=combi_collection_id):
             raise NotFoundError(f"Collection {collection_id} does not exist")
 
     async def prep_create_item(
@@ -805,7 +1573,6 @@ class DatabaseLogic:
             ConflictError: If the item already exists in the database.
 
         """
-        await self.check_collection_exists(collection_id=item["collection"])
 
         if not exist_ok and await self.client.exists(
             index=index_by_collection_id(item["collection"]),
@@ -854,11 +1621,14 @@ class DatabaseLogic:
 
         return self.item_serializer.stac_to_db(item, base_url)
 
-    async def create_item(self, item: Item, refresh: bool = False):
+    async def create_item(self, cat_path: str, collection_id: str, item: Item, workspace: str, refresh: bool = False):
         """Database logic for creating one item.
 
         Args:
+            cat_path (str): The path of the catalog from the resource path.
+            collection_id (str): The id of the collection from the resource path
             item (Item): The item to be created.
+            workspace (str): The workspace of the user creating the item.
             refresh (bool, optional): Refresh the index after performing the operation. Defaults to False.
 
         Raises:
@@ -870,9 +1640,37 @@ class DatabaseLogic:
         # todo: check if collection exists, but cache
         item_id = item["id"]
         collection_id = item["collection"]
+        gen_cat_path = self.generate_cat_path(cat_path)
+        combi_collection_id = gen_cat_path + "||" + collection_id
+        combi_item_id = self.generate_cat_path(cat_path, collection_id) + "||" + item_id
+
+        if await self.client.exists(index=ITEMS_INDEX, id=combi_item_id):
+            raise ConflictError(f"Item {item_id} already exists in Collection {collection_id}")
+
+        try:
+            parent_collection = await self.client.get(index=COLLECTIONS_INDEX, id=combi_collection_id)
+            parent_collection = parent_collection["_source"]
+        except exceptions.NotFoundError:
+            raise NotFoundError(f"Parent collection {collection_id} not found")
+
+        # Check if parent catalog exists
+        if cat_path != "root":
+            access_control = parent_collection.get("_sfapi_internal", {})
+            if access_control.get("owner") != workspace:
+                raise HTTPException(status_code=403, detail="You do not have permission to create items in this collection")
+        else:
+            if workspace != ADMIN_WORKSPACE:
+                raise HTTPException(status_code=403, detail="Only admin can create items at root level")
+
+        item.setdefault("_sfapi_internal", {})
+        item["_sfapi_internal"].update({"cat_path": gen_cat_path})
+        item["_sfapi_internal"].update({"owner": workspace})
+        item["_sfapi_internal"].update({"exp_public": access_control.get("exp_public", False)}) 
+        item["_sfapi_internal"].update({"inf_public": False}) # from children (so always False)
+
         es_resp = await self.client.index(
-            index=index_by_collection_id(collection_id),
-            id=mk_item_id(item_id, collection_id),
+            index=ITEMS_INDEX,
+            id=combi_item_id,
             document=item,
             refresh=refresh,
         )
@@ -883,62 +1681,388 @@ class DatabaseLogic:
             )
 
     async def delete_item(
-        self, item_id: str, collection_id: str, refresh: bool = False
+        self, cat_path: str, item_id: str, collection_id: str, workspace: str, refresh: bool = False
     ):
         """Delete a single item from the database.
 
         Args:
+            cat_path (str): The path of the catalog from the resource path.
             item_id (str): The id of the Item to be deleted.
             collection_id (str): The id of the Collection that the Item belongs to.
+            workspace (str): The workspace of the user deleting the item.
             refresh (bool, optional): Whether to refresh the index after the deletion. Default is False.
 
         Raises:
             NotFoundError: If the Item does not exist in the database.
         """
+
+        combi_item_id = self.generate_cat_path(cat_path, collection_id) + "||" + item_id
+        gen_cat_path = self.generate_cat_path(cat_path)
+        combi_collection_id = gen_cat_path + "||" + collection_id
+
+        if not await self.client.exists(index=ITEMS_INDEX, id=combi_item_id):
+            raise NotFoundError(f"Item {item_id} not found in Collection {collection_id}")
+
+        try:
+            parent_collection = await self.client.get(index=COLLECTIONS_INDEX, id=combi_collection_id)
+            parent_collection = parent_collection["_source"]
+        except exceptions.NotFoundError:
+            raise NotFoundError(f"Parent collection {collection_id} not found")
+
+        # Check if workspace has access
+        if cat_path != "root":
+            access_control = parent_collection.get("_sfapi_internal", {})
+            if access_control.get("owner") != workspace:
+                raise HTTPException(status_code=403, detail="You do not have permission to delete items in this collection")
+        else:
+            if workspace != ADMIN_WORKSPACE:
+                raise HTTPException(status_code=403, detail="Only admin can delete items at root level")
+
         try:
             await self.client.delete(
-                index=index_by_collection_id(collection_id),
-                id=mk_item_id(item_id, collection_id),
+                index=ITEMS_INDEX,
+                id=combi_item_id,
                 refresh=refresh,
             )
         except exceptions.NotFoundError:
             raise NotFoundError(
                 f"Item {item_id} in collection {collection_id} not found"
             )
-
-    async def create_collection(self, collection: Collection, refresh: bool = False):
-        """Create a single collection in the database.
+        
+    async def find_catalog(self, cat_path: str, workspaces: Optional[List[str]], user_is_authenticated: bool) -> Catalog:
+        """Find and return a catalog from the database.
 
         Args:
-            collection (Collection): The Collection object to be created.
+            self: The instance of the object calling this function.
+            cat_path (str): The path of the catalog to be found.
+            workspaces (Optional[List[str]]): The list of workspaces to filter by.
+            user_is_authenticated (bool): Whether the user is authenticated.
+
+        Returns:
+            Catalog: The found catalog, represented as a `Catalog` object.
+
+        Raises:
+            NotFoundError: If the catalog with the given `cat_path` is not found in the database.
+
+        Notes:
+            This function searches for a catalog in the database using the specified `cat_path` and returns the found
+            catalog as a `Catalog` object. If the catalog is not found, a `NotFoundError` is raised.
+        """
+
+        if cat_path.count("/") > 0:
+            cat_path, catalog_id = cat_path.rsplit("/", 1)
+        else:
+            catalog_id = cat_path
+            cat_path = "root"
+        cat_path = cat_path[:-9] if cat_path.endswith("/catalogs") else cat_path # remove trailing /catalogs
+        gen_cat_path = self.generate_cat_path(cat_path)
+        if gen_cat_path:
+            combi_cat_path = gen_cat_path + "||" + catalog_id
+        else:
+            combi_cat_path = catalog_id
+
+        try:
+            catalog = await self.client.get(index=CATALOGS_INDEX, id=combi_cat_path)
+            catalog = catalog["_source"]
+        except exceptions.NotFoundError:
+            raise NotFoundError(f"Catalog {catalog_id} not found")
+        
+        access_control = catalog.get("_sfapi_internal")
+        if not access_control.get("exp_public", False) and not access_control.get("inf_public", False):
+            if not user_is_authenticated:
+                raise HTTPException(status_code=401, detail="User is not authenticated")
+            for workspace in workspaces:
+                if workspace == access_control.get("owner", ""):
+                    return catalog
+            raise HTTPException(status_code=403, detail="User is not authorized to access this catalog")
+
+        return catalog
+        
+
+    async def create_catalog(self, cat_path: str, catalog: Catalog, workspace: str, refresh: bool = False):
+        """Create a single catalog in the database.
+
+        Args:
+            cat_path (Str): The path to the parent catalog.
+            catalog (Catalog): The Catalog object to be created.
+            workspace (Str): The workspace sending the create request
             refresh (bool, optional): Whether to refresh the index after the creation. Default is False.
 
         Raises:
-            ConflictError: If a Collection with the same id already exists in the database.
+            ConflictError: If a Catalog with the same id already exists in the database.
 
         Notes:
-            A new index is created for the items in the Collection using the `create_item_index` function.
+            A new index is created for the items in the Catalog using the `create_item_index` function.
         """
-        collection_id = collection["id"]
 
-        if await self.client.exists(index=COLLECTIONS_INDEX, id=collection_id):
-            raise ConflictError(f"Collection {collection_id} already exists")
+        catalog_id = catalog["id"]
+        gen_cat_path = self.generate_cat_path(cat_path)
+
+        if cat_path == "root":
+            combi_cat_path = catalog_id
+        else:
+            catalog_id = catalog["id"]
+            combi_cat_path = gen_cat_path + "||" + catalog_id
+
+        if await self.client.exists(index=CATALOGS_INDEX, id=combi_cat_path):
+            raise ConflictError(f"Catalog {catalog_id} already exists")
+        
+        parent_catalog = None
+
+        # Check if parent catalog exists
+        if cat_path != "root":
+            parent_path, parent_id = self.generate_parent_id(cat_path)
+            try:
+                parent_catalog = await self.client.get(index=CATALOGS_INDEX, id=parent_path)
+                parent_catalog = parent_catalog["_source"]
+            except exceptions.NotFoundError:
+                raise NotFoundError(f"Parent catalog {parent_id} not found")
+            access_control = parent_catalog.get("_sfapi_internal", {})
+            if access_control.get("owner") != workspace:
+                if access_control.get("owner") == ADMIN_WORKSPACE and gen_cat_path == USER_WRITEABLE_CATALOG:
+                    pass
+                else:
+                    raise HTTPException(status_code=403, detail="You do not have permission to create catalogs in this catalog")
+        else:
+            if workspace != ADMIN_WORKSPACE:
+                raise HTTPException(status_code=403, detail="Only admin can create catalogs at root level")
+        if workspace == ADMIN_WORKSPACE:
+            is_public = True
+        elif parent_catalog and access_control.get("owner") == ADMIN_WORKSPACE:
+            is_public = False # if parent catalog is owned by admin, set this private
+        elif parent_catalog and access_control.get("owner") == workspace:
+            is_public = access_control.get("exp_public", False) # if parent catalog is owned by user, set this to parent's value
+        else:
+            is_public = False # otherwise set private
+
+        catalog.setdefault("_sfapi_internal", {})
+        catalog["_sfapi_internal"].update({"cat_path": gen_cat_path})
+        catalog["_sfapi_internal"].update({"owner": workspace})
+        catalog["_sfapi_internal"].update({"exp_public": is_public}) # explicit public setting (from parent)
+        catalog["_sfapi_internal"].update({"inf_public": False}) # inferred public setting (from children)
+        catalog["_sfapi_internal"].update({"count_public_children": 0}) # no children to infer from yet
 
         await self.client.index(
-            index=COLLECTIONS_INDEX,
-            id=collection_id,
-            document=collection,
+            index=CATALOGS_INDEX,
+            id=combi_cat_path,
+            document=catalog,
             refresh=refresh,
         )
 
-        await create_item_index(collection_id)
+        #await create_collection_index(catalog_id)
 
-    async def find_collection(self, collection_id: str) -> Collection:
+    async def update_catalog(
+        self, cat_path: str, catalog: Catalog, workspace: str, refresh: bool = False
+    ):
+        """Update a catalog from the database.
+
+        Args:
+            self: The instance of the object calling this function.
+            cat_path (str): The ID of the catalog to be updated.
+            catalog (Catalog): The Catalog object to be used for the update.
+            workspace (str): The workspace of the user updating the catalog.
+            refresh (bool, optional): Whether to refresh the index after the update. Default is False.
+
+        Raises:
+            NotFoundError: If the catalog with the given `cat_path` is not
+            found in the database.
+
+        Notes:
+            This function updates the catalog in the database using the specified
+            `cat_path` and with the catalog specified in the `Catalog` object.
+            If the catalog is not found, a `NotFoundError` is raised.
+        """
+
+        if cat_path.count("/") > 0:
+            cat_path, catalog_id = cat_path.rsplit("/", 1) # now cat_path ends with "catalogs"
+            cat_path = cat_path + "/"
+        else:
+            catalog_id = cat_path
+            cat_path = ""
+        gen_cat_path = self.generate_cat_path(cat_path)
+        if gen_cat_path:
+            combi_cat_path = gen_cat_path + "||" + catalog["id"]
+        else:
+            combi_cat_path = catalog["id"]
+
+        try:
+            prev_catalog = await self.client.get(index=CATALOGS_INDEX, id=combi_cat_path)
+        except exceptions.NotFoundError:
+            raise NotFoundError(f"Catalog {catalog_id} not found")
+        prev_catalog = prev_catalog["_source"]
+
+        if catalog_id != catalog["id"]:
+            # This is complex as we are using the hash of the cat_path to create the id
+            raise NotImplementedError(f"Given collection IDs are different: {catalog_id} != {catalog['id']}")
+            
+            await self.create_collection(cat_path, collection, refresh=refresh)
+
+            new_combi_collection_id = gen_cat_path + collection["id"]
+            await self.client.reindex(
+                body={
+                    "dest": {"index": f"{ITEMS_INDEX}"},
+                    "source": {"index": f"{ITEMS_INDEX}"},
+                    "script": {
+                        "lang": "painless",
+                        "source": f"""ctx._id = ctx._id.replace('{collection_id}', '{collection["id"]}'); ctx._source.collection = '{collection["id"]}' ;""",
+                    },
+                },
+                wait_for_completion=True,
+                refresh=refresh,
+            )
+
+            await self.delete_collection(cat_path, collection_id)
+
+        else:
+            # Check if workspace has permissions to update
+            access_control = prev_catalog.get("_sfapi_internal", {})
+            if access_control.get("owner") != workspace:
+                raise HTTPException(status_code=403, detail="You do not have permission to create catalogs in this catalog")
+
+            catalog.setdefault("_sfapi_internal", access_control)
+
+            await self.client.index(
+                index=CATALOGS_INDEX,
+                id=combi_cat_path,
+                document=catalog,
+                refresh=refresh,
+            )
+
+    async def update_catalog_access_policy(
+        self, cat_path: str, access_policy: AccessPolicy, workspace: str, refresh: bool = False
+    ):
+        """Update catalog access policy.
+
+        Args:
+            self: The instance of the object calling this function.
+            cat_path (str): The ID of the catalog to be updated.
+            access_policy (AccessPolicy): The AccessPolicy object to be used for the update.
+            workspace (str): The workspace of the user updating the catalog.
+            refresh (bool): Whether to refresh the index after the update. Default is False.
+
+        Raises:
+            NotFoundError: If the collection with the given `collection_id` is not
+            found in the database.
+
+        Notes:
+            This function updates the collection in the database using the specified
+            `collection_id` and with the collection specified in the `Collection` object.
+            If the collection is not found, a `NotFoundError` is raised.
+        """
+
+        if cat_path.count("/") > 0:
+            parent_cat_path, catalog_id = cat_path.rsplit("/", 1) # now cat_path ends with "catalogs"
+            parent_cat_path = parent_cat_path + "/"
+        else:
+            catalog_id = cat_path
+            parent_cat_path = ""
+        gen_par_cat_path = self.generate_cat_path(parent_cat_path)
+        if gen_par_cat_path:
+            combi_cat_path = gen_par_cat_path + "||" + catalog_id
+        else:
+            combi_cat_path = catalog_id
+
+        try:
+            prev_catalog = await self.client.get(index=CATALOGS_INDEX, id=combi_cat_path)
+        except exceptions.NotFoundError:
+            raise NotFoundError(f"Catalog {catalog_id} not found")
+        prev_catalog = prev_catalog["_source"]
+
+        # Check if workspace has permissions to update
+        access_control = prev_catalog.get("_sfapi_internal", {})
+        if access_control.get("owner") != workspace:
+            raise HTTPException(status_code=403, detail="You do not have permission to update access policy for this catalog")
+        logger.info(f"Updating policy for {combi_cat_path} with {access_policy.get('public', False)}")
+        annotations = {"_sfapi_internal": {"exp_public": access_policy.get("public", False)}}
+        if not access_policy.get("public", False):
+            # If now setting private, reset inf_public value to False too
+            annotations["_sfapi_internal"].update({"inf_public": False})
+
+        await self.client.update(
+                index=CATALOGS_INDEX,
+                id=combi_cat_path,
+                body={"doc": annotations},
+                refresh=True,
+            )
+
+        #  Need to update parent access to ensure access when now public
+        if parent_cat_path:
+            # Only make change if there is a change in access
+            if access_control.get("inf_public", False) != access_policy.get("public", False):
+                # Extract catalog path to parent catalog
+                cat_path = cat_path.rsplit("/", 1)[0][:-9] # remove trailing "/catalogs"
+                await self.update_parent_catalog_access(cat_path, access_policy.get("public", False))
+
+        gen_cat_path = self.generate_cat_path(cat_path)
+        await self.update_children_access_catalogs(prefix=gen_cat_path, public=access_policy.get("public", False))
+        await self.update_children_access_collections(prefix=gen_cat_path, public=access_policy.get("public", False))
+        await self.update_children_access_items(prefix=gen_cat_path, public=access_policy.get("public", False))
+        
+        
+        # await self.client.index(
+        #     index=COLLECTIONS_INDEX,
+        #     id=combi_cat_path,
+        #     document=prev_catalog,
+        #     refresh=refresh,
+        # )
+
+    async def delete_catalog(self, cat_path: str, workspace: str, refresh: bool = False):
+        """Delete a catalog from the database.
+
+        Parameters:
+            self: The instance of the object calling this function.
+            cat_path (str): The path of the catalog to be deleted.
+            workspace (str): The workspace of the user deleting the catalog.
+            refresh (bool): Whether to refresh the index after the deletion (default: False).
+
+        Raises:
+            NotFoundError: If the catalog with the given `cat_path` is not found in the database.
+
+        Notes:
+            This function first verifies that the catalog with the specified `cat_path` exists in the database, and then
+            deletes the catalog. If `refresh` is set to True, the index is refreshed after the deletion.
+        """
+
+        if cat_path.count("/") > 0:
+            parent_cat_path, catalog_id = cat_path.rsplit("/", 1)
+        else:
+            catalog_id = cat_path
+            parent_cat_path = ""
+        parent_cat_path = parent_cat_path[:-9] if parent_cat_path.endswith("/catalogs") else parent_cat_path # remove trailing /catalogs
+        hashed_parent_cat_path = self.generate_cat_path(parent_cat_path) 
+        if hashed_parent_cat_path:
+            combi_cat_path = hashed_parent_cat_path + "||" + catalog_id
+        else:
+            combi_cat_path = catalog_id
+
+        gen_cat_path = self.generate_cat_path(cat_path)
+
+        # Check if workspace has permissions to delete
+        try:
+            prev_catalog = await self.client.get(index=CATALOGS_INDEX, id=combi_cat_path)
+            prev_catalog = prev_catalog["_source"]
+        except exceptions.NotFoundError:
+            raise NotFoundError(f"Catalog {catalog_id} not found")
+        access_control = prev_catalog.get("_sfapi_internal", {})
+        if access_control.get("owner") != workspace:
+            raise HTTPException(status_code=403, detail="You do not have permission to delete catalogs in this catalog")
+        await self.client.delete(
+            index=CATALOGS_INDEX, id=combi_cat_path, refresh=refresh
+        )
+        await delete_catalogs_by_id_prefix(gen_cat_path)
+        await delete_collections_by_id_prefix(gen_cat_path)
+        await delete_items_by_id_prefix(gen_cat_path)
+        
+
+    async def find_collection(self, cat_path: str, collection_id: str, workspaces: Optional[List[str]], user_is_authenticated: bool) -> Collection:
         """Find and return a collection from the database.
 
         Args:
             self: The instance of the object calling this function.
+            cat_path (str): The path of the catalog from the resource path.
             collection_id (str): The ID of the collection to be found.
+            workspaces (Optional[List[str]]): The list of workspaces to filter by.
+            user_is_authenticated (bool): Whether the user is authenticated.
 
         Returns:
             Collection: The found collection, represented as a `Collection` object.
@@ -950,24 +2074,119 @@ class DatabaseLogic:
             This function searches for a collection in the database using the specified `collection_id` and returns the found
             collection as a `Collection` object. If the collection is not found, a `NotFoundError` is raised.
         """
+
+        gen_cat_path = self.generate_cat_path(cat_path)
+        combi_collection_id = gen_cat_path + "||" + collection_id
+
         try:
-            collection = await self.client.get(
-                index=COLLECTIONS_INDEX, id=collection_id
-            )
+            collection = await self.client.get(index=COLLECTIONS_INDEX, id=combi_collection_id)
+            collection = collection["_source"]
         except exceptions.NotFoundError:
             raise NotFoundError(f"Collection {collection_id} not found")
+        
+        ## Check user has access
+        access_control = collection.get("_sfapi_internal", {})
+        if not access_control.get("exp_public", False) and not access_control.get("inf_public", False):
+            if not user_is_authenticated:
+                raise HTTPException(status_code=401, detail="User is not authenticated")
+            for workspace in workspaces:
+                if workspace == access_control.get("owner", ""):
+                    return collection
+            raise HTTPException(status_code=403, detail="User is not authorized to access this collection")
 
-        return collection["_source"]
+        return collection
+    
+    def add_collection_search_fields(self, collection: Collection) -> Collection:
+        bbox = collection.get("extent", {}).get("spatial", {}).get("bbox", [])[0] # get first bbox definition
+        interval = collection.get("extent", {}).get("temporal", {}).get("interval", [])[0] 
+        coordinates = bbox2polygon(*bbox)
+        collection["_sfapi_internal"]["geometry"] = {
+            "type": "Polygon",
+            "coordinates": coordinates
+        }
+        # Define the earliest and latest possible dates
+        # TODO better handle null values here, but this suffices for the time being
+        EARLIEST_DATE = "0000-01-01T00:00:00.000Z"
+        LATEST_DATE = "9999-12-31T00:00:00.000Z"
+        collection["_sfapi_internal"]["datetime"] = {
+            "start": interval[0] if interval[0] else EARLIEST_DATE,
+            "end": interval[1] if interval[1] else LATEST_DATE
+        }
+
+        return collection
+
+
+    async def create_collection(self, cat_path: str, collection: Collection, workspace: str, refresh: bool = False):
+        """Create a single collection in the database.
+
+        Args:
+            cat_path (str): The path to the parent catalog.
+            collection (Collection): The Collection object to be created.
+            workspace (str): The workspace sending the create request
+            refresh (bool, optional): Whether to refresh the index after the creation. Default is False.
+
+        Raises:
+            ConflictError: If a Collection with the same id already exists in the database.
+
+        Notes:
+            A new index is created for the items in the Collection using the `create_item_index` function.
+        """
+        gen_cat_path = self.generate_cat_path(cat_path)
+        collection_id = collection["id"]
+        combi_collection_id = gen_cat_path + "||" + collection_id
+            
+        # Check if parent catalog exists
+        if cat_path != "root":
+            parent_path, parent_id = self.generate_parent_id(cat_path)
+            try:
+                parent_catalog = await self.client.get(index=CATALOGS_INDEX, id=parent_path)
+                parent_catalog = parent_catalog["_source"]
+            except exceptions.NotFoundError:
+                raise NotFoundError(f"Parent catalog {parent_id} not found")
+            access_control = parent_catalog.get("_sfapi_internal", {})
+            if access_control.get("owner") != workspace:
+                raise HTTPException(status_code=403, detail="You do not have permission to create collections in this catalog")
+        else:
+            if workspace != ADMIN_WORKSPACE:
+                raise HTTPException(status_code=403, detail="Only admin can create collections at root level")
+            
+        if await self.client.exists(index=COLLECTIONS_INDEX, id=combi_collection_id):
+            raise ConflictError(f"Collection {collection_id} already exists")
+
+        if parent_catalog:
+            is_public = access_control.get("exp_public", False) # if parent catalog is owned by user, set this to parent's value
+        else:
+            is_public = False # else set private
+
+        collection.setdefault("_sfapi_internal", {})
+        collection["_sfapi_internal"].update({"cat_path": gen_cat_path})
+        collection["_sfapi_internal"].update({"owner": workspace})
+        collection["_sfapi_internal"].update({"exp_public": is_public}) # explicit public setting (from parent)
+        collection["_sfapi_internal"].update({"inf_public": False}) # inferred public setting (from children)
+
+        collection = self.add_collection_search_fields(collection)
+
+        await self.client.index(
+            index=COLLECTIONS_INDEX,
+            id=combi_collection_id,
+            document=collection,
+            refresh=refresh,
+        )
+
+        # await create_item_index(collection_id)
 
     async def update_collection(
-        self, collection_id: str, collection: Collection, refresh: bool = False
+        self, cat_path: str, collection_id: str, collection: Collection, workspace: str, refresh: bool = False
     ):
         """Update a collection from the database.
 
         Args:
             self: The instance of the object calling this function.
+            cat_path (str): The path of the catalog from the resource path.
             collection_id (str): The ID of the collection to be updated.
             collection (Collection): The Collection object to be used for the update.
+            workspace (str): The workspace of the user updating the collection.
+            refresh (bool): Whether to refresh the index after the update. Default is False.
 
         Raises:
             NotFoundError: If the collection with the given `collection_id` is not
@@ -978,15 +2197,27 @@ class DatabaseLogic:
             `collection_id` and with the collection specified in the `Collection` object.
             If the collection is not found, a `NotFoundError` is raised.
         """
-        await self.find_collection(collection_id=collection_id)
+
+        gen_cat_path = self.generate_cat_path(cat_path)
+        combi_collection_id = gen_cat_path + "||" + collection_id
+        
+        try:
+            prev_collection = await self.client.get(index=COLLECTIONS_INDEX, id=combi_collection_id)
+            prev_collection = prev_collection["_source"]
+        except exceptions.NotFoundError:
+            raise NotFoundError(f"Collection {collection_id} not found")
 
         if collection_id != collection["id"]:
-            await self.create_collection(collection, refresh=refresh)
+            # This is complex as we are using the hash of the cat_path to create the collection_id
+            raise NotImplementedError(f"Given collection IDs are different: {collection_id} != {collection['id']}")
+            
+            await self.create_collection(cat_path, collection, refresh=refresh)
 
+            new_combi_collection_id = gen_cat_path + collection["id"]
             await self.client.reindex(
                 body={
-                    "dest": {"index": f"{ITEMS_INDEX_PREFIX}{collection['id']}"},
-                    "source": {"index": f"{ITEMS_INDEX_PREFIX}{collection_id}"},
+                    "dest": {"index": f"{ITEMS_INDEX}"},
+                    "source": {"index": f"{ITEMS_INDEX}"},
                     "script": {
                         "lang": "painless",
                         "source": f"""ctx._id = ctx._id.replace('{collection_id}', '{collection["id"]}'); ctx._source.collection = '{collection["id"]}' ;""",
@@ -996,22 +2227,83 @@ class DatabaseLogic:
                 refresh=refresh,
             )
 
-            await self.delete_collection(collection_id)
+            await self.delete_collection(cat_path, collection_id)
 
         else:
+            # Check if workspace has permissions to update collection
+            access_control = prev_collection.get("_sfapi_internal", {})
+            if access_control.get("owner") != workspace:
+                raise HTTPException(status_code=403, detail="You do not have permission to update collections in this catalog")
+
+            collection.setdefault("_sfapi_internal", access_control)
+
+            collection = self.add_collection_search_fields(collection)
+
             await self.client.index(
                 index=COLLECTIONS_INDEX,
-                id=collection_id,
+                id=combi_collection_id,
                 document=collection,
                 refresh=refresh,
             )
 
-    async def delete_collection(self, collection_id: str, refresh: bool = False):
+    async def update_collection_access_policy(
+        self, cat_path: str, collection_id: str, access_policy: AccessPolicy, workspace: str, refresh: bool = False
+    ):
+        """Update collection access policy.
+
+        Args:
+            self: The instance of the object calling this function.
+            cat_path (str): The path of the catalog from the resource path.
+            collection_id (str): The ID of the collection to be updated.
+            workspace (str): The workspace of the user updating the collection.
+            refresh (bool): Whether to refresh the index after the update. Default is False.
+
+        Raises:
+            NotFoundError: If the collection with the given `collection_id` is not
+            found in the database.
+
+        Notes:
+            This function updates the collection in the database using the specified
+            `collection_id` and with the collection specified in the `Collection` object.
+            If the collection is not found, a `NotFoundError` is raised.
+        """
+
+        gen_cat_path = self.generate_cat_path(cat_path)
+        combi_collection_id = gen_cat_path + "||" + collection_id
+
+        # Check if workspace has permissions to update collection access control
+        try:
+            prev_collection = await self.client.get(index=COLLECTIONS_INDEX, id=combi_collection_id)
+            prev_collection = prev_collection["_source"]
+        except exceptions.NotFoundError:
+            raise NotFoundError(f"Collection {collection_id} not found")
+        access_control = prev_collection.get("_sfapi_internal", {})
+        if access_control.get("owner") != workspace:
+            raise HTTPException(status_code=403, detail="You do not have permission to update the access policy for this collection")
+
+        annotations = {"_sfapi_internal": {"exp_public": access_policy.get("public", False)}}
+
+        await self.client.update(
+            index=COLLECTIONS_INDEX,
+            id=combi_collection_id,
+            body={"doc": annotations},
+            refresh=refresh,
+        )
+
+        # Need to update parent access to ensure access when now public
+        # Only make change if there is a change in access
+        if access_control.get("exp_public", False) != access_policy.get("public", False):
+            await self.update_parent_catalog_access(cat_path, access_policy.get("public", False))
+        await self.update_collection_children_access_items(cat_path=gen_cat_path, collection_id=collection_id, public=access_policy.get("public", False))
+
+    async def delete_collection(self, cat_path: str, collection_id: str, workspace: str, refresh: bool = False):
         """Delete a collection from the database.
 
         Parameters:
             self: The instance of the object calling this function.
+            cat_path (str): The path of the catalog from the resource path.
             collection_id (str): The ID of the collection to be deleted.
+            workspace (str): The workspace of the user deleting the collection.
             refresh (bool): Whether to refresh the index after the deletion (default: False).
 
         Raises:
@@ -1019,14 +2311,28 @@ class DatabaseLogic:
 
         Notes:
             This function first verifies that the collection with the specified `collection_id` exists in the database, and then
-            deletes the collection. If `refresh` is set to True, the index is refreshed after the deletion. Additionally, this
-            function also calls `delete_item_index` to delete the index for the items in the collection.
+            deletes the collection. If `refresh` is set to True, the index is refreshed after the deletion.
         """
-        await self.find_collection(collection_id=collection_id)
+
+        gen_cat_path = self.generate_cat_path(cat_path)
+        combi_collection_id = gen_cat_path + "||" + collection_id
+
+        # Check if workspace has permissions to update collection
+        try:
+            prev_collection = await self.client.get(index=COLLECTIONS_INDEX, id=combi_collection_id)
+            prev_collection = prev_collection["_source"]
+        except exceptions.NotFoundError:
+            raise NotFoundError(f"Parent collection {collection_id} not found")
+        access_control = prev_collection.get("_sfapi_internal", {})
+        if access_control.get("owner") != workspace:
+            raise HTTPException(status_code=403, detail="You do not have permission to delete collections in this catalog")
+
         await self.client.delete(
-            index=COLLECTIONS_INDEX, id=collection_id, refresh=refresh
+            index=COLLECTIONS_INDEX, id=combi_collection_id, refresh=refresh
         )
-        await delete_item_index(collection_id)
+
+        await delete_items_by_id_prefix_and_collection(gen_cat_path, collection_id)
+
 
     async def bulk_async(
         self, collection_id: str, processed_items: List[Item], refresh: bool = False
@@ -1077,19 +2383,58 @@ class DatabaseLogic:
         )
 
     # DANGER
-    async def delete_items(self) -> None:
+    async def delete_items(self, cat_path: str) -> None:
         """Danger. this is only for tests."""
+        pattern = f"{cat_path}*"
+        body={
+            "query": {
+                "wildcard": {
+                    "_sfapi_internal.cat_path": {
+                        "value": pattern
+                    }
+                }
+            }
+        }
         await self.client.delete_by_query(
-            index=ITEM_INDICES,
-            body={"query": {"match_all": {}}},
+            index=ITEMS_INDEX,
+            body=body,
             wait_for_completion=True,
         )
 
     # DANGER
-    async def delete_collections(self) -> None:
+    async def delete_collections(self, cat_path: str) -> None:
         """Danger. this is only for tests."""
+        pattern = f"{cat_path}*"
+        body={
+            "query": {
+                "wildcard": {
+                    "_sfapi_internal.cat_path": {
+                        "value": pattern
+                    }
+                }
+            }
+        }
         await self.client.delete_by_query(
             index=COLLECTIONS_INDEX,
-            body={"query": {"match_all": {}}},
+            body=body,
+            wait_for_completion=True,
+        )
+
+    # DANGER
+    async def delete_catalogs(self, cat_path: str) -> None:
+        """Danger. this is only for tests."""
+        pattern = f"{cat_path}*"
+        body={
+            "query": {
+                "wildcard": {
+                    "_sfapi_internal.cat_path": {
+                        "value": pattern
+                    }
+                }
+            }
+        }
+        await self.client.delete_by_query(
+            index=CATALOGS_INDEX,
+            body=body,
             wait_for_completion=True,
         )

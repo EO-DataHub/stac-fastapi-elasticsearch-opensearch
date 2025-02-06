@@ -41,10 +41,6 @@ class EsAggregationExtensionGetRequest(
 ):
     """Implementation specific query parameters for aggregation precision."""
 
-    collection_id: Optional[
-        Annotated[str, Path(description="Collection ID")]
-    ] = attr.ib(default=None)
-
     centroid_geohash_grid_frequency_precision: Optional[int] = attr.ib(default=None)
     centroid_geohex_grid_frequency_precision: Optional[int] = attr.ib(default=None)
     centroid_geotile_grid_frequency_precision: Optional[int] = attr.ib(default=None)
@@ -129,14 +125,16 @@ class EsAsyncAggregationClient(AsyncBaseAggregationClient):
     SUPPORTED_DATETIME_INTERVAL = {"day", "month", "year"}
     DEFAULT_DATETIME_INTERVAL = "month"
 
-    async def get_aggregations(self, collection_id: Optional[str] = None, **kwargs):
+    async def get_aggregations(self, auth_headers: dict, cat_path: Optional[str] = None, collection_id: Optional[str] = None, **kwargs):
         """Get the available aggregations for a catalog or collection defined in the STAC JSON. If no aggregations, default aggregations are used."""
         request: Request = kwargs["request"]
         base_url = str(request.base_url)
         links = [{"rel": "root", "type": "application/json", "href": base_url}]
+        workspaces = auth_headers.get("X-Workspaces", [])
+        user_is_authenticated = auth_headers.get("X-Authenticated", False)
 
-        if collection_id is not None:
-            collection_endpoint = urljoin(base_url, f"collections/{collection_id}")
+        if cat_path is not None and collection_id is not None:
+            collection_endpoint = urljoin(base_url, f"catalogs/{cat_path}/collections/{collection_id}")
             links.extend(
                 [
                     {
@@ -151,13 +149,33 @@ class EsAsyncAggregationClient(AsyncBaseAggregationClient):
                     },
                 ]
             )
-            if await self.database.check_collection_exists(collection_id) is None:
-                collection = await self.database.find_collection(collection_id)
+            if await self.database.check_collection_exists(cat_path, collection_id) is None:
+                collection = await self.database.find_collection(cat_path=cat_path, collection_id=collection_id, workspaces=workspaces, user_is_authenticated=user_is_authenticated)
                 aggregations = collection.get(
                     "aggregations", self.DEFAULT_AGGREGATIONS.copy()
                 )
             else:
                 raise IndexError(f"Collection {collection_id} does not exist")
+        elif cat_path is not None:
+            catalog_endpoint = urljoin(base_url, f"catalogs/{cat_path}")
+            links.extend(
+                [
+                    {
+                        "rel": "collection",
+                        "type": "application/json",
+                        "href": catalog_endpoint,
+                    },
+                    {
+                        "rel": "self",
+                        "type": "application/json",
+                        "href": urljoin(catalog_endpoint + "/", "aggregations"),
+                    },
+                ]
+            )
+            catalog = await self.database.find_catalog(cat_path=cat_path, workspaces=workspaces, user_is_authenticated=user_is_authenticated)
+            aggregations = catalog.get(
+                "aggregations", self.DEFAULT_AGGREGATIONS.copy()
+            )
         else:
             links.append(
                 {
@@ -330,7 +348,11 @@ class EsAsyncAggregationClient(AsyncBaseAggregationClient):
 
     async def aggregate(
         self,
+        auth_headers: dict,
         aggregate_request: Optional[EsAggregationExtensionPostRequest] = None,
+        cat_path: Optional[
+            Annotated[str, Path(description="Catalog Path")]
+        ] = None,
         collection_id: Optional[
             Annotated[str, Path(description="Collection ID")]
         ] = None,
@@ -354,7 +376,10 @@ class EsAsyncAggregationClient(AsyncBaseAggregationClient):
         request: Request = kwargs["request"]
         base_url = str(request.base_url)
         path = request.url.path
+        workspaces = auth_headers.get("X-Workspaces", [])
+        user_is_authenticated = auth_headers.get("X-Authenticated", False)
         search = self.database.make_search()
+        search = self.database.apply_access_filter(search=search, workspaces=workspaces)
 
         if aggregate_request is None:
 
@@ -412,6 +437,9 @@ class EsAsyncAggregationClient(AsyncBaseAggregationClient):
                 detail="No 'aggregations' found. Use '/aggregations' to return available aggregations",
             )
 
+        if cat_path:
+            search = self.database.apply_catalogs_filter(search=search, cat_path=cat_path)
+
         if aggregate_request.ids:
             search = self.database.apply_ids_filter(
                 search=search, item_ids=aggregate_request.ids
@@ -435,6 +463,9 @@ class EsAsyncAggregationClient(AsyncBaseAggregationClient):
                 search=search, intersects=aggregate_request.intersects
             )
 
+        if cat_path:
+            search = self.database.apply_catalogs_filter(search=search, cat_path=cat_path)
+
         if aggregate_request.collections:
             search = self.database.apply_collections_filter(
                 search=search, collection_ids=aggregate_request.collections
@@ -442,7 +473,7 @@ class EsAsyncAggregationClient(AsyncBaseAggregationClient):
             # validate that aggregations are supported for all collections
             for collection_id in aggregate_request.collections:
                 aggs = await self.get_aggregations(
-                    collection_id=collection_id, request=request
+                    cat_path=cat_path, collection_id=collection_id, request=request
                 )
                 supported_aggregations = (
                     aggs["aggregations"] + self.DEFAULT_AGGREGATIONS
@@ -456,7 +487,7 @@ class EsAsyncAggregationClient(AsyncBaseAggregationClient):
                         )
         else:
             # Validate that the aggregations requested are supported by the catalog
-            aggs = await self.get_aggregations(request=request)
+            aggs = await self.get_aggregations(cat_path=cat_path, request=request)
             supported_aggregations = aggs["aggregations"]
             for agg_name in aggregate_request.aggregations:
                 if agg_name not in [x["name"] for x in supported_aggregations]:
@@ -546,8 +577,8 @@ class EsAsyncAggregationClient(AsyncBaseAggregationClient):
             {"rel": "root", "type": "application/json", "href": base_url},
         ]
 
-        if collection_id:
-            collection_endpoint = urljoin(base_url, f"collections/{collection_id}")
+        if cat_path and collection_id:
+            collection_endpoint = urljoin(base_url, f"catalogs/{cat_path}/collections/{collection_id}")
             links.extend(
                 [
                     {
@@ -562,6 +593,22 @@ class EsAsyncAggregationClient(AsyncBaseAggregationClient):
                     },
                 ]
             )
+        elif cat_path:
+            catalog_endpoint = urljoin(base_url, f"catalogs/{cat_path}")
+            links.extend(
+                [
+                    {
+                        "rel": "catalog",
+                        "type": "application/json",
+                        "href": catalog_endpoint,
+                    },
+                    {
+                        "rel": "self",
+                        "type": "application/json",
+                        "href": urljoin(catalog_endpoint, "aggregate"),
+                    },
+                ]
+            )
         else:
             links.append(
                 {
@@ -573,5 +620,7 @@ class EsAsyncAggregationClient(AsyncBaseAggregationClient):
         results = AggregationCollection(
             type="AggregationCollection", aggregations=aggs, links=links
         )
+        
+        
 
         return results
