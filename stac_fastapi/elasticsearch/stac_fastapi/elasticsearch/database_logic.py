@@ -1466,61 +1466,50 @@ class DatabaseLogic:
         return search
 
     @staticmethod
-    def apply_cql2_filter_for_themes(search: Search, filter: Optional[Union[str, Dict[str, Any]]]) -> Search:
-        """Applies CQL2 filter for themes, handling both JSON strings and dictionaries correctly."""
+    def apply_cql2_filter_for_themes(search: Search, filter: Optional[Union[str, Dict[str, Any]]], debug: bool = False) -> Search:
+        """Applies CQL2 filter for themes, supporting multiple operators."""
 
         if not filter:
             return search
 
-        logger.info(f"Before conversion Filter: {filter}")
-        logger.info(f"Type of filter: {type(filter)}")
-
-        # Convert filter from JSON string if needed
+        # Convert JSON string to dict if needed
         if isinstance(filter, str):
             try:
-                filter = filter.strip()
-                filter = json.loads(filter)  # Convert JSON string to dictionary
-                logger.info(f"Converted filter from string: {filter}")
-            except json.JSONDecodeError as e:
-                logger.info(f"JSON decode error: {e}")
+                filter = json.loads(filter.strip())
+            except json.JSONDecodeError:
                 return search
         elif not isinstance(filter, dict):
-            logger.info(f"Invalid filter type: {type(filter)}")
             return search
 
-        # Check if there's a 'filter' key at the top level
-        actual_filter = filter.get("filter", filter)  # Use 'filter' key if present, else use the dict itself
-
-        # Extract operator and arguments
-        op = actual_filter.get("op")
-        args = actual_filter.get("args", [])
-
-        logger.info(f"op: {op}")
-        logger.info(f"args: {args}")
+        # Extract filter object
+        actual_filter = filter.get("filter", filter)
+        op, args = actual_filter.get("op"), actual_filter.get("args", [])
 
         # Validate filter structure
         if len(args) != 2 or not isinstance(args[0], dict) or "property" not in args[0]:
-            logger.info("Invalid filter structure.")
-            return search  
+            return search
 
-        field = args[0]["property"]
-        value = args[1]
+        field, value = args[0]["property"], args[1]
 
-        logger.info(f"field: {field}")
-        logger.info(f"value: {value}")
+        # Map CQL2 operators to Elasticsearch queries
+        operator_map = {
+            "=": Q("term", **{field: value}),
+            "!=": ~Q("term", **{field: value}),
+            ">": Q("range", **{field: {"gt": value}}),
+            "<": Q("range", **{field: {"lt": value}}),
+            ">=": Q("range", **{field: {"gte": value}}),
+            "<=": Q("range", **{field: {"lte": value}}),
+            "in": Q("terms", **{field: value if isinstance(value, list) else [value]})
+        }
 
-        # Build the query using the Q syntax
-        search = search.query(
-            Q(
-                "bool", 
-                must=[
-                    Q("term", **{field: value})
-                ]
-            )
-        )
+        # Check if the operator is supported
+        if op not in operator_map:
+            if debug: print(f"Unsupported operator: {op}")
+            return search
 
-        logger.info(f"Constructed Query: {json.dumps(search.to_dict(), indent=2)}")
-        return search
+        # Build and return the query
+        query = operator_map[op]
+        return search.query(Q("bool", must=[query]))
     
     @staticmethod
     def apply_cql2_filter(search: Search, _filter: Optional[Dict[str, Any]]):
