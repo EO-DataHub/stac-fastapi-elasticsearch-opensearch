@@ -1467,33 +1467,60 @@ class DatabaseLogic:
 
     @staticmethod
     def apply_cql2_filter_for_themes(search: Search, filter: Optional[Union[str, Dict[str, Any]]]) -> Search:
-        """Applies CQL2 filter for themes, handling both JSON strings and dictionaries."""
+        """Applies CQL2 filter for themes, handling both JSON strings and dictionaries correctly."""
 
         if not filter:
             return search
 
-        # Convert JSON string to dict if necessary
+        print(f"Before conversion Filter: {filter}")
+        print(f"Type of filter: {type(filter)}")
+
+        # Convert filter from JSON string if needed
         if isinstance(filter, str):
             try:
-                filter = json.loads(filter.strip())
-            except json.JSONDecodeError:
+                filter = filter.strip()
+                filter = json.loads(filter)  # Convert JSON string to dictionary
+                print(f"Converted filter from string: {filter}")
+            except json.JSONDecodeError as e:
+                print(f"JSON decode error: {e}")
                 return search
         elif not isinstance(filter, dict):
+            print(f"Invalid filter type: {type(filter)}")
             return search
 
-        # Extract the actual filter object
-        actual_filter = filter.get("filter", filter)
-        op, args = actual_filter.get("op"), actual_filter.get("args", [])
+        # Check if there's a 'filter' key at the top level
+        actual_filter = filter.get("filter", filter)  # Use 'filter' key if present, else use the dict itself
+
+        # Extract operator and arguments
+        op = actual_filter.get("op")
+        args = actual_filter.get("args", [])
+
+        print(f"op: {op}")
+        print(f"args: {args}")
 
         # Validate filter structure
-        if op != "=" or len(args) != 2 or not isinstance(args[0], dict) or "property" not in args[0]:
-            return search
+        if len(args) != 2 or not isinstance(args[0], dict) or "property" not in args[0]:
+            print("Invalid filter structure.")
+            return search  
 
-        # Extract field and value for the query
-        field, value = args[0]["property"], args[1]
+        field = args[0]["property"]
+        value = args[1]
 
-        # Build and return the Elasticsearch query
-        return search.query(Q("bool", must=[Q("term", **{field: value})]))
+        print(f"field: {field}")
+        print(f"value: {value}")
+
+        # Build the query using the Q syntax
+        search = search.query(
+            Q(
+                "bool", 
+                must=[
+                    Q("term", **{field: value})
+                ]
+            )
+        )
+
+        print(f"Constructed Query: {json.dumps(search.to_dict(), indent=2)}")
+        return search
     
     @staticmethod
     def apply_cql2_filter(search: Search, _filter: Optional[Dict[str, Any]]):
