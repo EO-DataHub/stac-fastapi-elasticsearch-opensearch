@@ -10,6 +10,7 @@ from stac_fastapi.core.datetime_utils import now_to_rfc3339_str
 from stac_fastapi.core.models.links import CollectionLinks, CatalogLinks
 from stac_fastapi.types import stac as stac_types
 from stac_fastapi.types.links import ItemLinks, resolve_links
+from stac_fastapi.types.conformance import BASE_CONFORMANCE_CLASSES
 
 from urllib.parse import urljoin
 from stac_pydantic.shared import MimeTypes
@@ -215,7 +216,7 @@ class CatalogSerializer(Serializer):
 
     @classmethod
     def db_to_stac(
-        cls, catalog: dict, request: Request, sub_catalogs: List[str] = [], sub_collections: List[str] = [], extensions: Optional[List[str]] = []
+        cls, catalog: dict, request: Request, sub_catalogs: List[str] = [], sub_collections: List[str] = [], conformance_classes: List[str] = BASE_CONFORMANCE_CLASSES, extensions: Optional[List[str]] = []
     ) -> stac_types.Catalog:
         """Transform database model to STAC catalog.
 
@@ -237,14 +238,7 @@ class CatalogSerializer(Serializer):
         catalog.setdefault("stac_version", "")
         catalog.setdefault("title", "")
         catalog.setdefault("description", "")
-        catalog.setdefault("keywords", [])
-        catalog.setdefault("license", "")
-        catalog.setdefault("providers", [])
-        catalog.setdefault("summaries", {})
-        catalog.setdefault(
-            "extent", {"spatial": {"bbox": []}, "temporal": {"interval": []}}
-        )
-        catalog.setdefault("assets", {})
+        catalog.setdefault("conformsTo", conformance_classes)
 
         # Create the catalog links using CatalogLinks
         cat_path = regen_cat_path(catalog.get("_sfapi_internal", {}).get("cat_path", ""))

@@ -22,6 +22,7 @@ from stac_fastapi.elasticsearch.config import (
     ElasticsearchSettings as SyncElasticsearchSettings,
 )
 from stac_fastapi.types.access_policy import AccessPolicy
+from stac_fastapi.types.conformance import BASE_CONFORMANCE_CLASSES
 from stac_fastapi.types.errors import ConflictError, NotFoundError
 from stac_fastapi.types.stac import Catalog, Collection, Item
 
@@ -454,6 +455,10 @@ class DatabaseLogic:
         default=CollectionSerializer
     )
     catalog_serializer: Type[CatalogSerializer] = attr.ib(default=CatalogSerializer)
+
+    base_conformance_classes: List[str] = attr.ib(
+        factory=lambda: BASE_CONFORMANCE_CLASSES
+    )
 
     extensions: List[str] = attr.ib(default=attr.Factory(list))
 
@@ -927,7 +932,7 @@ class DatabaseLogic:
         return catalogs
     
     async def get_all_catalogs(
-        self, cat_path: Optional[str], token: Optional[str], limit: int, request: Request, workspaces: Optional[List[str]]
+        self, cat_path: Optional[str], token: Optional[str], limit: int, request: Request, conformance_classes: List[str], workspaces: Optional[List[str]]
     ) -> Tuple[List[Dict[str, Any]], Optional[str]]:
         """Retrieve a list of all catalogs from Elasticsearch, supporting pagination.
 
@@ -997,7 +1002,7 @@ class DatabaseLogic:
             sub_collections = await self.get_all_sub_collections(cat_path=child_cat_path, workspaces=workspaces)
             catalogs.append(
                 self.catalog_serializer.db_to_stac(
-                    catalog=hit["_source"], sub_catalogs=sub_catalogs, sub_collections=sub_collections, request=request, extensions=self.extensions
+                    catalog=hit["_source"], sub_catalogs=sub_catalogs, sub_collections=sub_collections, request=request, conformance_classes=conformance_classes, extensions=self.extensions
                 )
             )
 

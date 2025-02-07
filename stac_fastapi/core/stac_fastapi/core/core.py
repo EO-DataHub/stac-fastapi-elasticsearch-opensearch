@@ -393,7 +393,7 @@ class CoreClient(AsyncBaseCoreClient):
             limit = 10_000
 
         catalogs, maybe_count, next_token = await self.database.get_all_catalogs(
-            cat_path=cat_path, token=token, limit=limit, request=request, workspaces=workspaces,
+            cat_path=cat_path, token=token, limit=limit, request=request, workspaces=workspaces, conformance_classes=self.conformance_classes(),
         )
 
         if not cat_path:
@@ -455,6 +455,7 @@ class CoreClient(AsyncBaseCoreClient):
             sub_catalogs=sub_catalogs,
             sub_collections=sub_collections,
             request=request,
+            conformance_classes=self.conformance_classes(),
             extensions=[type(ext).__name__ for ext in self.extensions],
         )
 
