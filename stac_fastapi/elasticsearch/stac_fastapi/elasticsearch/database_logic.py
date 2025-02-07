@@ -537,7 +537,7 @@ class DatabaseLogic:
 
     def generate_cat_path(self, cat_path: str, collection_id: str = None) -> str:
         if cat_path == "root":
-            return "root"
+            return ""
         cat_path = cat_path.replace("catalogs/", "")
         if cat_path.endswith("/"):
             cat_path = cat_path[:-1]
@@ -1774,7 +1774,7 @@ class DatabaseLogic:
             cat_path, catalog_id = cat_path.rsplit("/", 1)
         else:
             catalog_id = cat_path
-            cat_path = "root"
+            cat_path = ""
         cat_path = cat_path[:-9] if cat_path.endswith("/catalogs") else cat_path # remove trailing /catalogs
         gen_cat_path = self.generate_cat_path(cat_path)
         if gen_cat_path:
@@ -1822,7 +1822,6 @@ class DatabaseLogic:
         if cat_path == "root":
             combi_cat_path = catalog_id
         else:
-            catalog_id = catalog["id"]
             combi_cat_path = gen_cat_path + "||" + catalog_id
 
         if await self.client.exists(index=CATALOGS_INDEX, id=combi_cat_path):
