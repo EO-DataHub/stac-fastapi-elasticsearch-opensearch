@@ -544,7 +544,7 @@ class DatabaseLogic:
         cat_path = cat_path.replace("/", ",")
         if collection_id:
             cat_path = f"{cat_path}|{collection_id}"
-        return cat_path
+        return "root," + cat_path
 
     def generate_parent_id(self, cat_path: str) -> Tuple[str, str]:
         if cat_path.endswith("/"):
@@ -554,7 +554,7 @@ class DatabaseLogic:
             cat_path = cat_path + "/"
         else:
             catalog_id = cat_path
-            cat_path = ""
+            cat_path = "root"
 
         gen_cat_path = self.generate_cat_path(cat_path)
         if gen_cat_path:
@@ -1819,11 +1819,7 @@ class DatabaseLogic:
         catalog_id = catalog["id"]
         gen_cat_path = self.generate_cat_path(cat_path)
 
-        if cat_path == "root":
-            combi_cat_path = catalog_id
-        else:
-            catalog_id = catalog["id"]
-            combi_cat_path = gen_cat_path + "||" + catalog_id
+        combi_cat_path = gen_cat_path + "||" + catalog_id
 
         if await self.client.exists(index=CATALOGS_INDEX, id=combi_cat_path):
             raise ConflictError(f"Catalog {catalog_id} already exists")
@@ -1899,12 +1895,10 @@ class DatabaseLogic:
             cat_path = cat_path + "/"
         else:
             catalog_id = cat_path
-            cat_path = ""
+            cat_path = "root"
         gen_cat_path = self.generate_cat_path(cat_path)
-        if gen_cat_path:
-            combi_cat_path = gen_cat_path + "||" + catalog["id"]
-        else:
-            combi_cat_path = catalog["id"]
+        
+        combi_cat_path = gen_cat_path + "||" + catalog_id
 
         try:
             prev_catalog = await self.client.get(index=CATALOGS_INDEX, id=combi_cat_path)
@@ -2048,13 +2042,11 @@ class DatabaseLogic:
             parent_cat_path, catalog_id = cat_path.rsplit("/", 1)
         else:
             catalog_id = cat_path
-            parent_cat_path = ""
+            parent_cat_path = "root"
         parent_cat_path = parent_cat_path[:-9] if parent_cat_path.endswith("/catalogs") else parent_cat_path # remove trailing /catalogs
         hashed_parent_cat_path = self.generate_cat_path(parent_cat_path) 
-        if hashed_parent_cat_path:
-            combi_cat_path = hashed_parent_cat_path + "||" + catalog_id
-        else:
-            combi_cat_path = catalog_id
+
+        combi_cat_path = hashed_parent_cat_path + "||" + catalog_id
 
         gen_cat_path = self.generate_cat_path(cat_path)
 
