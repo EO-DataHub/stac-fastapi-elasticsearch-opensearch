@@ -544,7 +544,7 @@ class DatabaseLogic:
         cat_path = cat_path.replace("/", ",")
         if collection_id:
             cat_path = f"{cat_path}|{collection_id}"
-        return "root," + cat_path
+        return cat_path
 
     def generate_parent_id(self, cat_path: str) -> Tuple[str, str]:
         if cat_path.endswith("/"):
@@ -570,6 +570,7 @@ class DatabaseLogic:
 
         # Get parent catalog
         try:
+            logger.info("Getting catalog %s in index %s", parent_id, CATALOGS_INDEX)
             parent_catalog = await self.client.get(index=CATALOGS_INDEX, id=parent_id)
         except exceptions.NotFoundError:
             raise NotFoundError(f"Catalog {catalog_id} not found")
@@ -866,11 +867,11 @@ class DatabaseLogic:
             A tuple of (collections, next pagination token if any).
         """
 
-        if cat_path:
-            if cat_path.endswith("/catalogs"):
-                cat_path = cat_path.rsplit("/", 1)[0]
-            elif cat_path.endswith("catalogs"):
-                cat_path = ""
+        # if cat_path:
+        #     if cat_path.endswith("/catalogs"):
+        #         cat_path = cat_path.rsplit("/", 1)[0]
+        #     elif cat_path.endswith("catalogs"):
+        #         cat_path = ""
 
         search = self.make_search()
         search = self.apply_access_filter(search=search, workspaces=workspaces)
@@ -905,11 +906,11 @@ class DatabaseLogic:
             A tuple of (catalogs, next pagination token if any).
         """
 
-        if cat_path:
-            if cat_path.endswith("/catalogs"):
-                cat_path = cat_path.rsplit("/", 1)[0]
-            elif cat_path.endswith("catalogs"):
-                cat_path = ""
+        # if cat_path:
+        #     if cat_path.endswith("/catalogs"):
+        #         cat_path = cat_path.rsplit("/", 1)[0]
+        #     elif cat_path.endswith("catalogs"):
+        #         cat_path = ""
 
         search = self.make_search()
         search = self.apply_access_filter(search=search, workspaces=workspaces)
@@ -957,7 +958,7 @@ class DatabaseLogic:
         search = self.make_search()
         search = self.apply_access_filter(search=search, workspaces=workspaces)
 
-        if cat_path != None: # need to include "" cat path to only return top-level catalogs
+        if cat_path != None: # Need "" to be included here to return top-level catalogs
             search = self.apply_catalogs_filter(search=search, catalog_path=cat_path)
 
         query = search.query.to_dict() if search.query else None
@@ -1050,6 +1051,7 @@ class DatabaseLogic:
         combi_item_path = gen_cat_path + "||" + item_id
 
         try:
+            logger.info("Getting item %s in index %s", combi_item_path, ITEMS_INDEX)
             item = await self.client.get(
                 index=ITEMS_INDEX,
                 id=combi_item_path,
@@ -1669,6 +1671,7 @@ class DatabaseLogic:
             raise ConflictError(f"Item {item_id} already exists in Collection {collection_id}")
 
         try:
+            logger.info("Getting parent collection %s, in index %s", combi_collection_id, COLLECTIONS_INDEX)
             parent_collection = await self.client.get(index=COLLECTIONS_INDEX, id=combi_collection_id)
             parent_collection = parent_collection["_source"]
         except exceptions.NotFoundError:
@@ -1719,12 +1722,14 @@ class DatabaseLogic:
 
         combi_item_id = self.generate_cat_path(cat_path, collection_id) + "||" + item_id
         gen_cat_path = self.generate_cat_path(cat_path)
+
         combi_collection_id = gen_cat_path + "||" + collection_id
 
         if not await self.client.exists(index=ITEMS_INDEX, id=combi_item_id):
             raise NotFoundError(f"Item {item_id} not found in Collection {collection_id}")
 
         try:
+            logger.info("Getting parent collection %s, in index %s", combi_collection_id, COLLECTIONS_INDEX)
             parent_collection = await self.client.get(index=COLLECTIONS_INDEX, id=combi_collection_id)
             parent_collection = parent_collection["_source"]
         except exceptions.NotFoundError:
@@ -1777,12 +1782,14 @@ class DatabaseLogic:
             cat_path = ""
         cat_path = cat_path[:-9] if cat_path.endswith("/catalogs") else cat_path # remove trailing /catalogs
         gen_cat_path = self.generate_cat_path(cat_path)
+
         if gen_cat_path:
             combi_cat_path = gen_cat_path + "||" + catalog_id
         else:
             combi_cat_path = catalog_id
 
         try:
+            logger.info("Getting catalog %s, in index %s", combi_cat_path, CATALOGS_INDEX)
             catalog = await self.client.get(index=CATALOGS_INDEX, id=combi_cat_path)
             catalog = catalog["_source"]
         except exceptions.NotFoundError:
@@ -1833,6 +1840,7 @@ class DatabaseLogic:
         if cat_path != "root":
             parent_path, parent_id = self.generate_parent_id(cat_path)
             try:
+                logger.info("Getting parent catalog %s, in index %s", parent_path, CATALOGS_INDEX)
                 parent_catalog = await self.client.get(index=CATALOGS_INDEX, id=parent_path)
                 parent_catalog = parent_catalog["_source"]
             except exceptions.NotFoundError:
@@ -1900,10 +1908,14 @@ class DatabaseLogic:
             catalog_id = cat_path
             cat_path = "root"
         gen_cat_path = self.generate_cat_path(cat_path)
-        
-        combi_cat_path = gen_cat_path + "||" + catalog_id
+
+        if gen_cat_path:
+            combi_cat_path = gen_cat_path + "||" + catalog_id
+        else:
+            combi_cat_path = catalog_id
 
         try:
+            logger.info("Getting catalog %s, in index %s", combi_cat_path, CATALOGS_INDEX)
             prev_catalog = await self.client.get(index=CATALOGS_INDEX, id=combi_cat_path)
         except exceptions.NotFoundError:
             raise NotFoundError(f"Catalog {catalog_id} not found")
@@ -1973,14 +1985,15 @@ class DatabaseLogic:
             parent_cat_path = parent_cat_path + "/"
         else:
             catalog_id = cat_path
-            parent_cat_path = ""
-        gen_par_cat_path = self.generate_cat_path(parent_cat_path)
-        if gen_par_cat_path:
-            combi_cat_path = gen_par_cat_path + "||" + catalog_id
+            parent_cat_path = "root"
+        gen_parent_cat_path = self.generate_cat_path(parent_cat_path)
+        if gen_parent_cat_path:
+            combi_cat_path = gen_parent_cat_path + "||" + catalog_id
         else:
             combi_cat_path = catalog_id
 
         try:
+            logger.info("Getting catalog %s, in index %s", combi_cat_path, CATALOGS_INDEX)
             prev_catalog = await self.client.get(index=CATALOGS_INDEX, id=combi_cat_path)
         except exceptions.NotFoundError:
             raise NotFoundError(f"Catalog {catalog_id} not found")
@@ -2015,14 +2028,7 @@ class DatabaseLogic:
         await self.update_children_access_catalogs(prefix=gen_cat_path, public=access_policy.get("public", False))
         await self.update_children_access_collections(prefix=gen_cat_path, public=access_policy.get("public", False))
         await self.update_children_access_items(prefix=gen_cat_path, public=access_policy.get("public", False))
-        
-        
-        # await self.client.index(
-        #     index=COLLECTIONS_INDEX,
-        #     id=combi_cat_path,
-        #     document=prev_catalog,
-        #     refresh=refresh,
-        # )
+
 
     async def delete_catalog(self, cat_path: str, workspace: str, refresh: bool = False):
         """Delete a catalog from the database.
@@ -2047,14 +2053,18 @@ class DatabaseLogic:
             catalog_id = cat_path
             parent_cat_path = "root"
         parent_cat_path = parent_cat_path[:-9] if parent_cat_path.endswith("/catalogs") else parent_cat_path # remove trailing /catalogs
-        hashed_parent_cat_path = self.generate_cat_path(parent_cat_path) 
-
-        combi_cat_path = hashed_parent_cat_path + "||" + catalog_id
+        gen_parent_cat_path = self.generate_cat_path(parent_cat_path)
+        
+        if gen_parent_cat_path:
+            combi_cat_path = gen_parent_cat_path + "||" + catalog_id
+        else:
+            combi_cat_path = catalog_id
 
         gen_cat_path = self.generate_cat_path(cat_path)
 
         # Check if workspace has permissions to delete
         try:
+            logger.info("Getting catalog %s, in index %s", combi_cat_path, CATALOGS_INDEX)
             prev_catalog = await self.client.get(index=CATALOGS_INDEX, id=combi_cat_path)
             prev_catalog = prev_catalog["_source"]
         except exceptions.NotFoundError:
@@ -2095,6 +2105,7 @@ class DatabaseLogic:
         combi_collection_id = gen_cat_path + "||" + collection_id
 
         try:
+            logger.info("Getting collection %s, in index %s", combi_collection_id, COLLECTIONS_INDEX)
             collection = await self.client.get(index=COLLECTIONS_INDEX, id=combi_collection_id)
             collection = collection["_source"]
         except exceptions.NotFoundError:
@@ -2155,6 +2166,7 @@ class DatabaseLogic:
         if cat_path != "root":
             parent_path, parent_id = self.generate_parent_id(cat_path)
             try:
+                logger.info("Getting parent catalog %s, in index %s", parent_path, CATALOGS_INDEX)
                 parent_catalog = await self.client.get(index=CATALOGS_INDEX, id=parent_path)
                 parent_catalog = parent_catalog["_source"]
             except exceptions.NotFoundError:
@@ -2218,6 +2230,7 @@ class DatabaseLogic:
         combi_collection_id = gen_cat_path + "||" + collection_id
         
         try:
+            logger.info("Getting collection %s, in index %s", combi_collection_id, COLLECTIONS_INDEX)
             prev_collection = await self.client.get(index=COLLECTIONS_INDEX, id=combi_collection_id)
             prev_collection = prev_collection["_source"]
         except exceptions.NotFoundError:
@@ -2289,6 +2302,7 @@ class DatabaseLogic:
 
         # Check if workspace has permissions to update collection access control
         try:
+            logger.info("Getting collection %s, in index %s", combi_collection_id, COLLECTIONS_INDEX)
             prev_collection = await self.client.get(index=COLLECTIONS_INDEX, id=combi_collection_id)
             prev_collection = prev_collection["_source"]
         except exceptions.NotFoundError:
@@ -2335,6 +2349,7 @@ class DatabaseLogic:
 
         # Check if workspace has permissions to update collection
         try:
+            logger.info("Getting collection %s, in index %s", combi_collection_id, COLLECTIONS_INDEX)
             prev_collection = await self.client.get(index=COLLECTIONS_INDEX, id=combi_collection_id)
             prev_collection = prev_collection["_source"]
         except exceptions.NotFoundError:
