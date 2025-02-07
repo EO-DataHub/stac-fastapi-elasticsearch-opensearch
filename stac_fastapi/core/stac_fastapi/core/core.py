@@ -1080,7 +1080,7 @@ class TransactionsClient(AsyncBaseTransactionsClient):
     @overrides
     async def update_collection_access_policy(
         self, cat_path: str, collection_id: str, access_policy: AccessPolicy, workspace: str, **kwargs
-    ) -> str:
+    ) -> None:
         """
         Update a collection access policy.
 
@@ -1108,7 +1108,7 @@ class TransactionsClient(AsyncBaseTransactionsClient):
             cat_path=cat_path, collection_id=collection_id, access_policy=access_policy, workspace=workspace
         )
 
-        return "Updated access policy"
+        return None
 
     @overrides
     async def delete_collection(
@@ -1231,7 +1231,7 @@ class TransactionsClient(AsyncBaseTransactionsClient):
 
         catalog = await self.database.find_catalog(cat_path=cat_path, workspaces=[workspace], user_is_authenticated=True)
 
-        return catalog
+        return None
 
     @overrides
     async def delete_catalog(
