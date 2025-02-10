@@ -26,6 +26,7 @@ from stac_fastapi.core.serializers import CatalogSerializer, CollectionSerialize
 from stac_fastapi.core.session import Session
 from stac_fastapi.core.utilities import filter_fields
 from stac_fastapi.extensions.core.filter.client import AsyncBaseFiltersClient
+from stac_fastapi.extensions.core.filter.request import FilterLang
 from stac_fastapi.extensions.core.collection_search.client import AsyncBaseCollectionSearchClient
 from stac_fastapi.extensions.core.collection_search.request import BaseCollectionSearchPostRequest
 from stac_fastapi.extensions.third_party.bulk_transactions import (
@@ -1202,7 +1203,7 @@ class TransactionsClient(AsyncBaseTransactionsClient):
     @overrides
     async def update_catalog_access_policy(
         self, cat_path: str, access_policy: AccessPolicy, workspace: str, **kwargs
-    ) -> str:
+    ) -> None:
         """
         Update a catalog access policy.
 
