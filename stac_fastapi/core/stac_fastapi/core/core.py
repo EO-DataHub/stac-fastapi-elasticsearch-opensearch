@@ -203,7 +203,7 @@ class CoreClient(AsyncBaseCoreClient):
                 ]
             )
 
-        catalogs = await self.all_catalogs(request=kwargs["request"],  auth_headers=auth_headers, root_only=True)
+        catalogs = await self.all_catalogs(request=kwargs["request"],  auth_headers=auth_headers, cat_path="")
         for catalog in catalogs["catalogs"]:
             landing_page["links"].append(
                 {
@@ -371,7 +371,7 @@ class CoreClient(AsyncBaseCoreClient):
             extensions=[type(ext).__name__ for ext in self.extensions],
         )
     
-    async def all_catalogs(self, auth_headers: dict, cat_path: str = None, root_only: bool = False, **kwargs) -> stac_types.Catalogs:
+    async def all_catalogs(self, auth_headers: dict, cat_path: str = None, **kwargs) -> stac_types.Catalogs:
         """Read all catalogs from the database.
 
         Args:
@@ -390,9 +390,8 @@ class CoreClient(AsyncBaseCoreClient):
         limit = int(request.query_params.get("limit", 10))
         token = request.query_params.get("token")
 
-        # If root_only we only want the top-level catalogs returned
-        if not cat_path and root_only:
-            cat_path = ""
+        # We want all the top-level catalogs returned
+        if cat_path == "":
             limit = 10_000
 
         catalogs, maybe_count, next_token = await self.database.get_all_catalogs(
