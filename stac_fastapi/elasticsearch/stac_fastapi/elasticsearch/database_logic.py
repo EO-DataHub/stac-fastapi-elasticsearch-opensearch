@@ -28,18 +28,6 @@ from stac_fastapi.types.stac import Catalog, Collection, Item
 
 # Get the logger for this module
 logger = logging.getLogger(__name__)
-logger.setLevel(logging.INFO)  # Set the logging level to INFO for this module
-
-# Create a console handler and set the level to INFO
-console_handler = logging.StreamHandler()
-console_handler.setLevel(logging.INFO)
-
-# Create a formatter and set it for the handler
-formatter = logging.Formatter("%(asctime)s - %(levelname)s - %(message)s")
-console_handler.setFormatter(formatter)
-
-# Add the handler to the logger
-logger.addHandler(console_handler)
 
 NumType = Union[float, int]
 
@@ -307,7 +295,7 @@ async def create_collection_index() -> None:
     )
     await client.close()
 
-async def create_item_index(collection_id: str=None):
+async def create_item_index():
     """
     Create the index for Items. The settings of the index template will be used implicitly.
     Args:
@@ -879,12 +867,6 @@ class DatabaseLogic:
         Returns:
             A tuple of (collections, next pagination token if any).
         """
-
-        # if cat_path:
-        #     if cat_path.endswith("/catalogs"):
-        #         cat_path = cat_path.rsplit("/", 1)[0]
-        #     elif cat_path.endswith("catalogs"):
-        #         cat_path = ""
 
         search = self.make_search()
         search = self.apply_access_filter(search=search, workspaces=workspaces)
@@ -1804,7 +1786,6 @@ class DatabaseLogic:
         else:
             combi_cat_path = catalog_id
 
-        print("HEREREER")
         logger.info(f"Getting catalog {combi_cat_path}, in index {CATALOGS_INDEX}")
 
         try:
