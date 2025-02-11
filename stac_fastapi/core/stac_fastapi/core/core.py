@@ -204,7 +204,7 @@ class CoreClient(AsyncBaseCoreClient):
                 ]
             )
 
-        catalogs = await self.get_all_sub_catalogs(cat_path="", workspaces=workspaces)
+        catalogs = await self.database.get_all_sub_catalogs(cat_path="", workspaces=workspaces)
         for catalog in catalogs["catalogs"]:
             landing_page["links"].append(
                 {
