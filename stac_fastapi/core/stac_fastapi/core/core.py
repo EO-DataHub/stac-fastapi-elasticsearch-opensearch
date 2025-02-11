@@ -166,6 +166,7 @@ class CoreClient(AsyncBaseCoreClient):
         """
         logger.info("Getting landing page")
         request: Request = kwargs["request"]
+        workspaces = auth_headers.get("X-Workspaces", [])
         base_url = get_base_url(request)
         landing_page = self._landing_page(
             base_url=base_url,
@@ -203,14 +204,14 @@ class CoreClient(AsyncBaseCoreClient):
                 ]
             )
 
-        catalogs = await self.all_catalogs(request=kwargs["request"],  auth_headers=auth_headers, cat_path="")
+        catalogs = await self.get_all_sub_catalogs(cat_path="", workspaces=workspaces)
         for catalog in catalogs["catalogs"]:
             landing_page["links"].append(
                 {
                     "rel": Relations.child.value,
                     "type": MimeTypes.json.value,
-                    "title": catalog.get("title") or catalog.get("id"),
-                    "href": urljoin(base_url, f"catalogs/{catalog['id']}"),
+                    "title": catalog[1],
+                    "href": urljoin(base_url, f"catalogs/{catalog[0]}"),
                 }
             )
 
@@ -282,7 +283,7 @@ class CoreClient(AsyncBaseCoreClient):
         )
 
         if cat_path:
-            search = self.database.apply_catalogs_filter(
+            search = self.database.apply_recursive_catalogs_filter(
                     search=search, catalog_path=cat_path
                 )
 
@@ -496,7 +497,6 @@ class CoreClient(AsyncBaseCoreClient):
         request: Request = kwargs["request"]
         workspaces = auth_headers.get("X-Workspaces", [])
         token = request.query_params.get("token")
-
         base_url = str(request.base_url)
 
         collection = await self.get_collection(
@@ -510,7 +510,7 @@ class CoreClient(AsyncBaseCoreClient):
         search = self.database.apply_collections_filter(
             search=search, collection_ids=[collection_id]
         )
-        search = self.database.apply_catalogs_filter(
+        search = self.database.apply_recursive_catalogs_filter(
             search=search, catalog_path=cat_path
         )
         search = self.database.apply_access_filter(
@@ -787,7 +787,7 @@ class CoreClient(AsyncBaseCoreClient):
             )
 
         if cat_path:
-            search = self.database.apply_catalogs_filter(
+            search = self.database.apply_recursive_catalogs_filter(
                     search=search, catalog_path=cat_path
                 )
 
@@ -1465,7 +1465,7 @@ class EsAsyncCollectionSearchClient(AsyncBaseCollectionSearchClient):
         )
 
         if cat_path:
-            search = self.database.apply_catalogs_filter(
+            search = self.database.apply_recursive_catalogs_filter(
                     search=search, catalog_path=cat_path
                 )
 

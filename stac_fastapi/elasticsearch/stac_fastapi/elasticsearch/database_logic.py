@@ -536,8 +536,8 @@ class DatabaseLogic:
 
     """Utils"""
 
-    def generate_cat_path(self, cat_path: str, collection_id: str = None) -> str:
-        if cat_path == "root":
+    def generate_cat_path(self, cat_path: Optional[str], collection_id: str = None) -> str:
+        if cat_path == "root" or cat_path == None:
             return ""
         cat_path = cat_path.replace("catalogs/", "")
         if cat_path.endswith("/"):
@@ -746,6 +746,9 @@ class DatabaseLogic:
         Returns:
             A tuple of (collections, next pagination token if any).
         """
+
+        logger.info(f"Getting all collections in catalog '{cat_path}'")
+        
         search_after = None
         if token:
             search_after = [token]
@@ -753,8 +756,7 @@ class DatabaseLogic:
         search = self.make_search()
         search = self.apply_access_filter(search=search, workspaces=workspaces)
 
-        if cat_path != None:
-            search = self.apply_catalogs_filter(search=search, catalog_path=cat_path)
+        search = self.apply_recursive_catalogs_filter(search=search, catalog_path=cat_path)
             
         query = search.query.to_dict() if search.query else None
 
@@ -871,8 +873,7 @@ class DatabaseLogic:
         search = self.make_search()
         search = self.apply_access_filter(search=search, workspaces=workspaces)
 
-        if cat_path != None:
-            search = self.apply_catalogs_filter(search=search, catalog_path=cat_path)
+        search = self.apply_catalogs_filter(search=search, catalog_path=cat_path)
             
         query = search.query.to_dict() if search.query else None
 
@@ -901,17 +902,10 @@ class DatabaseLogic:
             A tuple of (catalogs, next pagination token if any).
         """
 
-        # if cat_path:
-        #     if cat_path.endswith("/catalogs"):
-        #         cat_path = cat_path.rsplit("/", 1)[0]
-        #     elif cat_path.endswith("catalogs"):
-        #         cat_path = ""
-
         search = self.make_search()
         search = self.apply_access_filter(search=search, workspaces=workspaces)
 
-        if cat_path != None:
-            search = self.apply_catalogs_filter(search=search, catalog_path=cat_path)
+        search = self.apply_catalogs_filter(search=search, catalog_path=cat_path)
 
         query = search.query.to_dict() if search.query else None
 
@@ -940,6 +934,8 @@ class DatabaseLogic:
             A tuple of (catalogs, next pagination token if any).
         """
 
+        logger.info(f"Getting all catalogs in catalog '{cat_path}'")
+
         search_after = None
         if token:
             search_after = [token]
@@ -949,12 +945,13 @@ class DatabaseLogic:
                 cat_path = cat_path.rsplit("/", 1)[0]
             elif cat_path.endswith("catalogs"):
                 cat_path = ""
+        else:
+            cat_path = ""
 
         search = self.make_search()
         search = self.apply_access_filter(search=search, workspaces=workspaces)
 
-        if cat_path != None: # Need "" to be included here to return top-level catalogs
-            search = self.apply_catalogs_filter(search=search, catalog_path=cat_path)
+        search = self.apply_recursive_catalogs_filter(search=search, catalog_path=cat_path)
 
         query = search.query.to_dict() if search.query else None
 
@@ -1042,6 +1039,8 @@ class DatabaseLogic:
             with the index for the Collection as the target index and the combined `mk_item_id` as the document id.
         """
 
+        logger.info(f"Getting item {item_id} in collection {collection_id} in catalog {cat_path}")
+
         gen_cat_path = self.generate_cat_path(cat_path, collection_id)
 
         combi_item_path = gen_cat_path + "||" + item_id
@@ -1089,6 +1088,15 @@ class DatabaseLogic:
         """Database logic to search STAC catalog path."""
         cat_path = self.generate_cat_path(catalog_path)
         return search.filter("term", **{"_sfapi_internal.cat_path": cat_path})
+
+    def apply_recursive_catalogs_filter(self, search: Search, catalog_path: Optional[str]):
+        """Database logic to search STAC catalog path."""
+        if not catalog_path:
+            return search
+        cat_path = self.generate_cat_path(catalog_path)
+        if cat_path:
+            rec_cat_path = cat_path + ",*"
+        return search.filter("term", **{"_sfapi_internal.cat_path": rec_cat_path})
     
     @staticmethod
     def apply_access_filter(search: Search, workspaces: List[str]):
@@ -1514,8 +1522,7 @@ class DatabaseLogic:
 
         search = self.apply_access_filter(search=search, workspaces=workspaces)
 
-        if cat_path:
-            search = self.apply_catalogs_filter(search=search, catalog_path=cat_path)
+        search = self.apply_recursive_catalogs_filter(search=search, catalog_path=cat_path)
 
         query = search.query.to_dict() if search.query else None
         if query:
