@@ -542,7 +542,20 @@ class CoreClient(AsyncBaseCoreClient):
             self.item_serializer.db_to_stac(item, base_url=base_url) for item in items
         ]
 
-        links = await PagingLinks(request=request, next=next_token).get_links()
+        catalogs_href_url = f"catalogs/{cat_path}/catalogs/collections/{collection_id}/items"
+
+        links = [
+            {"rel": Relations.root.value, "type": MimeTypes.json, "href": base_url},
+            {
+                "rel": Relations.self.value,
+                "type": MimeTypes.json,
+                "href": urljoin(base_url, catalogs_href_url),
+            },
+        ]
+
+        if next_token:
+            next_link = PagingLinks(next=next_token, request=request).link_next()
+            links.append(next_link)
 
         return stac_types.ItemCollection(
             type="FeatureCollection",
