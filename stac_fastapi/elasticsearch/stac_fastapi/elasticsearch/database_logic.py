@@ -1091,12 +1091,18 @@ class DatabaseLogic:
 
     def apply_recursive_catalogs_filter(self, search: Search, catalog_path: Optional[str]):
         """Database logic to search STAC catalog path."""
-        if not catalog_path:
-            return search
         cat_path = self.generate_cat_path(catalog_path)
         if cat_path:
             rec_cat_path = cat_path + ",*"
-        return search.filter("term", **{"_sfapi_internal.cat_path": rec_cat_path})
+        else:
+            return search
+        return search.filter(
+            "bool",
+            should=[
+                {"wildcard": {"_sfapi_internal.cat_path": rec_cat_path}},
+                {"term": {"_sfapi_internal.cat_path": cat_path}}
+            ]
+        )
     
     @staticmethod
     def apply_access_filter(search: Search, workspaces: List[str]):
