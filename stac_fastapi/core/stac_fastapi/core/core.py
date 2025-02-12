@@ -510,7 +510,7 @@ class CoreClient(AsyncBaseCoreClient):
         search = self.database.apply_collections_filter(
             search=search, collection_ids=[collection_id]
         )
-        search = self.database.apply_recursive_catalogs_filter(
+        search = self.database.apply_catalogs_filter(
             search=search, catalog_path=cat_path
         )
         search = self.database.apply_access_filter(
