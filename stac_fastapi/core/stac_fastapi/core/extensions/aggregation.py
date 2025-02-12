@@ -161,7 +161,7 @@ class EsAsyncAggregationClient(AsyncBaseAggregationClient):
             links.extend(
                 [
                     {
-                        "rel": "collection",
+                        "rel": "catalog",
                         "type": "application/json",
                         "href": catalog_endpoint,
                     },
