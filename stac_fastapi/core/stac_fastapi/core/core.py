@@ -7,6 +7,7 @@ from enum import Enum
 from typing import Any, Dict, List, Optional, Set, Type, Union
 from urllib.parse import unquote_plus, urljoin
 
+import json
 import attr
 import orjson
 from fastapi import HTTPException, Request
@@ -41,6 +42,7 @@ from stac_fastapi.types.extension import ApiExtension
 from stac_fastapi.types.requests import get_base_url
 from stac_fastapi.types.rfc3339 import DateTimeType
 from stac_fastapi.types.search import BaseSearchPostRequest
+from stac_fastapi.extensions.core.filter.request import FilterLang
 
 # Get the logger for this module
 logger = logging.getLogger(__name__)
@@ -248,6 +250,8 @@ class CoreClient(AsyncBaseCoreClient):
         limit: Optional[int] = 10,
         token: Optional[str] = None,
         q: Optional[List[str]] = None,
+        filter: Optional[dict] = None, 
+        filter_lang: Optional[str] = None,
         **kwargs) -> stac_types.Collections:
         """Read all collections from the database.
 
@@ -301,7 +305,31 @@ class CoreClient(AsyncBaseCoreClient):
 
         if q:
             search = self.database.apply_keyword_collections_filter(search=search, q=q)
+        
+        # Apply CQL filters if provided
+        if filter:
+            filter_lang = filter_lang or "cql2-json"  # Default to "cql2-json" if not provided
 
+            # Check if the filter_lang is valid
+            if filter_lang not in ("cql-json", "cql2-json", "cql2-text"):
+                raise ValueError(f"Unsupported filter language: {filter_lang}")
+
+            # Parse the filter based on filter_lang
+            if isinstance(filter, str):
+                try:
+                    if filter_lang == "cql2-json":
+                        filter_obj = orjson.loads(filter)
+                    elif filter_lang in ("cql2-text", "cql-json"):
+                        filter_obj = orjson.loads(to_cql2(parse_cql2_text(filter)))
+                    else:
+                        raise ValueError(f"Unsupported filter language: {filter_lang}")
+                except (orjson.JSONDecodeError, ValueError) as e:
+                    raise ValueError(f"Invalid filter provided: {e}") from e
+            else:
+                filter_obj = filter
+
+            normalized_filter = filter_obj.get("filter", filter_obj)
+            search = self.database.apply_cql2_filter(search=search, _filter=normalized_filter)
         collections, maybe_count, next_token = await self.database.execute_collection_search(
             search=search,
             limit=limit,
@@ -1487,6 +1515,35 @@ class EsAsyncCollectionSearchClient(AsyncBaseCollectionSearchClient):
 
         if search_request.limit:
             limit = search_request.limit
+        
+        if hasattr(search_request, "filter"):
+            _filter = getattr(search_request, "filter", None)
+
+            if _filter:
+                # Get filter_lang or default to "cql2-json"
+                filter_lang = getattr(search_request, "filter_lang", "cql2-json")
+
+                # Ensure filter_lang is a valid literal
+                if filter_lang not in ("cql-json", "cql2-json", "cql2-text"):
+                    raise ValueError(f"Unsupported filter language: {filter_lang}")
+
+                # Check if the filter is a string and parse accordingly
+                if isinstance(_filter, str):
+                    try:
+                        if filter_lang == "cql2-json":
+                            filter_obj = orjson.loads(_filter)
+                        elif filter_lang in ("cql2-text", "cql-json"):
+                            filter_obj = orjson.loads(to_cql2(parse_cql2_text(_filter)))
+                        else:
+                            raise ValueError(f"Unsupported filter language: {filter_lang}")
+                    except (orjson.JSONDecodeError, ValueError) as e:
+                        raise ValueError(f"Invalid filter provided: {e}") from e
+                else:
+                    filter_obj = _filter
+
+                normalized_filter = filter_obj.get("filter", filter_obj)
+                search = self.database.apply_cql2_filter(search=search, _filter=normalized_filter)
+
 
         collections, maybe_count, next_token = await self.database.execute_collection_search(
             search=search,
