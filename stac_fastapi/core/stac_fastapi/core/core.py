@@ -542,7 +542,7 @@ class CoreClient(AsyncBaseCoreClient):
             self.item_serializer.db_to_stac(item, base_url=base_url) for item in items
         ]
 
-        catalogs_href_url = f"catalogs/{cat_path}/catalogs/collections/{collection_id}/items"
+        catalogs_href_url = f"catalogs/{cat_path}/collections/{collection_id}/items"
 
         links = [
             {"rel": Relations.root.value, "type": MimeTypes.json, "href": base_url},
