@@ -859,7 +859,7 @@ class DatabaseLogic:
     
     async def get_all_sub_collections(
         self, cat_path: str, workspaces: Optional[List[str]],
-    ) -> List[str]:
+    ) -> List[dict]:
         """Retrieve a list of all collections from Elasticsearch.
 
         Args:
@@ -885,13 +885,13 @@ class DatabaseLogic:
         )
 
         hits = response["hits"]["hits"]
-        collections = [(hit["_source"]["id"], hit["_source"].get("title", hit["_source"]["id"]), hit["_source"]["_sfapi_internal"]["cat_path"]) for hit in hits]
+        collections = [{"id": hit["_source"]["id"], "title": hit["_source"].get("title", hit["_source"]["id"])} for hit in hits]
 
         return collections
     
     async def get_all_sub_catalogs(
         self, cat_path: str, workspaces: Optional[List[str]]
-    ) -> List[str]:
+    ) -> List[dict]:
         """Retrieve a list of all catalogs from Elasticsearch.
 
         Args:
@@ -917,7 +917,7 @@ class DatabaseLogic:
         )
 
         hits = response["hits"]["hits"]
-        catalogs = [(hit["_source"]["id"], hit["_source"].get("title", hit["_source"]["id"]), hit["_source"]["_sfapi_internal"]["cat_path"]) for hit in hits]
+        catalogs = [{"id": hit["_source"]["id"], "title": hit["_source"].get("title", hit["_source"]["id"])} for hit in hits]
 
         return catalogs
     
