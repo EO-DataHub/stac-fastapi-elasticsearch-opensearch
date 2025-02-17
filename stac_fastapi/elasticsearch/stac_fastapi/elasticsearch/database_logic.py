@@ -9,6 +9,7 @@ from copy import deepcopy
 from typing import Any, Dict, Iterable, List, Optional, Protocol, Tuple, Type, Union
 
 import attr
+import orjson
 from elasticsearch_dsl import Q, Search
 from starlette.requests import Request
 
@@ -24,6 +25,8 @@ from stac_fastapi.elasticsearch.config import (
 from stac_fastapi.types.access_policy import AccessPolicy
 from stac_fastapi.types.errors import ConflictError, NotFoundError
 from stac_fastapi.types.stac import Catalog, Collection, Item
+from pygeofilter.backends.cql2_json import to_cql2
+from pygeofilter.parsers.cql2_text import parse as parse_cql2_text
 
 logger = logging.getLogger(__name__)
 
@@ -292,7 +295,6 @@ async def create_collection_index() -> None:
         aliases={COLLECTIONS_INDEX: {}},
     )
     await client.close()
-
 
 async def delete_catalogs_by_id_prefix(prefix: str, refresh: bool = True):
     client = AsyncElasticsearchSettings().create_client
@@ -2246,6 +2248,36 @@ class DatabaseLogic:
                 refresh=refresh,
             )
 
+    def decode_cql2_filter(self, search: Search, _filter: Union[str, dict], filter_lang: str) -> Search:
+        """
+        Decode the _filter using the given filter_lang and apply it.
+        Supported filter_lang values: "cql2-json" and "cql2-text" (or "cql-json").
+        
+        Raises HTTPException 400 if the filter is invalid.
+        """
+        # Determine filter_obj by checking _filter's type
+        filter_obj = None
+        if isinstance(_filter, str):
+            if filter_lang == "cql2-json":
+                try:
+                    filter_obj = orjson.loads(_filter)
+                except orjson.JSONDecodeError as e:
+                    raise HTTPException(status_code=400, detail=f"Invalid filter provided (cql2-json): {e}") from e
+            elif filter_lang == "cql2-text":
+                try:
+                    filter_obj = orjson.loads(to_cql2(parse_cql2_text(_filter)))
+                except Exception as e:
+                    raise HTTPException(status_code=400, detail=f"Invalid filter provided (cql2-text): {e}") from e
+            else:
+                raise HTTPException(status_code=400, detail=f"Unsupported filter language: {filter_lang}")
+        elif isinstance(_filter, dict):
+            filter_obj = _filter
+        else:
+            raise HTTPException(status_code=400, detail="Filter must be a string or dictionary")
+        
+        normalized_filter = filter_obj.get("filter", filter_obj)
+        return self.apply_cql2_filter(search=search, _filter=normalized_filter)
+    
     async def update_collection_access_policy(
         self, cat_path: str, collection_id: str, access_policy: AccessPolicy, workspace: str, refresh: bool = False
     ):

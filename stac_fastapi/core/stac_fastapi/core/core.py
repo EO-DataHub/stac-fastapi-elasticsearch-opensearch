@@ -248,7 +248,8 @@ class CoreClient(AsyncBaseCoreClient):
         limit: Optional[int] = 10,
         token: Optional[str] = None,
         q: Optional[List[str]] = None,
-        filter: Optional[dict] = None, 
+        filter: Optional[Union[str, dict]] = None, 
+        filter_lang: Optional[str] = None,
         **kwargs) -> stac_types.Collections:
         """Read all collections from the database.
 
@@ -305,17 +306,10 @@ class CoreClient(AsyncBaseCoreClient):
         
         # Process the filter if provided.
         if filter:
-            if isinstance(filter, str):
-                try:
-                    filter_obj = orjson.loads(filter)
-                except orjson.JSONDecodeError:
-                    filter_obj = orjson.loads(to_cql2(parse_cql2_text(filter)))
-            else:
-                filter_obj = filter
-
-            normalized_filter = filter_obj.get("filter", filter_obj)
-            search = self.database.apply_cql2_filter(search=search, _filter=normalized_filter)
-
+            # default to "cql2-text"
+            filter_lang = filter_lang or "cql2-text"
+            search = self.database.decode_cql2_filter(search, filter, filter_lang)
+            
         collections, maybe_count, next_token = await self.database.execute_collection_search(
             search=search,
             limit=limit,
@@ -1502,21 +1496,10 @@ class EsAsyncCollectionSearchClient(AsyncBaseCollectionSearchClient):
         if search_request.limit:
             limit = search_request.limit
         
-        # Process the filter if provided
-        if hasattr(search_request, "filter"):
-            _filter = getattr(search_request, "filter", None)
-            if _filter:
-                # If _filter is a string, try to parse as JSON; if that fails, treat it as CQL2 text.
-                if isinstance(_filter, str):
-                    try:
-                        filter_obj = orjson.loads(_filter)
-                    except orjson.JSONDecodeError:
-                        filter_obj = orjson.loads(to_cql2(parse_cql2_text(_filter)))
-                else:
-                    filter_obj = _filter
-
-                normalized_filter = filter_obj.get("filter", filter_obj)
-                search = self.database.apply_cql2_filter(search=search, _filter=normalized_filter)
+        _filter = getattr(search_request, "filter", None)
+        if _filter:
+            # For POST, default to "cql2-json"
+            search = self.database.decode_cql2_filter(search, _filter, getattr(search_request, "filter_lang", "cql2-json"))
 
         collections, maybe_count, next_token = await self.database.execute_collection_search(
             search=search,
