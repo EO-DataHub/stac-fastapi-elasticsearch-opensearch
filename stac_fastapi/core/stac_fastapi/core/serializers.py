@@ -216,7 +216,7 @@ class CatalogSerializer(Serializer):
 
     @classmethod
     def db_to_stac(
-        cls, catalog: dict, request: Request, sub_catalogs: List[str] = [], sub_collections: List[str] = [], conformance_classes: List[str] = BASE_CONFORMANCE_CLASSES, extensions: Optional[List[str]] = []
+        cls, catalog: dict, request: Request, sub_catalogs: List[dict] = [], sub_collections: List[dict] = [], conformance_classes: List[str] = BASE_CONFORMANCE_CLASSES, extensions: Optional[List[str]] = []
     ) -> stac_types.Catalog:
         """Transform database model to STAC catalog.
 
@@ -238,7 +238,9 @@ class CatalogSerializer(Serializer):
         catalog.setdefault("stac_version", "")
         catalog.setdefault("title", "")
         catalog.setdefault("description", "")
-        catalog.setdefault("conformsTo", conformance_classes)
+
+        # Set conformance classes
+        catalog["conformsTo"] = conformance_classes
 
         # Create the catalog links using CatalogLinks
         cat_path = regen_cat_path(catalog.get("_sfapi_internal", {}).get("cat_path", ""))
@@ -262,8 +264,8 @@ class CatalogSerializer(Serializer):
                 {
                     "rel": "child",
                     "type": MimeTypes.json.value,
-                    "href": urljoin(str(request.base_url), f"{href_url}catalogs/{catalog_id}/catalogs/{sub_catalog[0]}"),
-                    "title": sub_catalog[1],
+                    "href": urljoin(str(request.base_url), f"{href_url}catalogs/{catalog_id}/catalogs/{sub_catalog["id"]}"),
+                    "title": sub_catalog["title"],
                 }
             )
         for sub_collection in sub_collections:
@@ -275,8 +277,8 @@ class CatalogSerializer(Serializer):
                 {
                     "rel": "child",
                     "type": MimeTypes.json.value,
-                    "href": urljoin(str(request.base_url), f"{href_url}catalogs/{catalog_id}/collections/{sub_collection[0]}"),
-                    "title": sub_collection[1],
+                    "href": urljoin(str(request.base_url), f"{href_url}catalogs/{catalog_id}/collections/{sub_collection["id"]}"),
+                    "title": sub_collection["title"],
                 }
             )
 
