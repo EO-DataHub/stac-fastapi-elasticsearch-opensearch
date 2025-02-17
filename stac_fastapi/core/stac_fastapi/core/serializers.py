@@ -264,7 +264,7 @@ class CatalogSerializer(Serializer):
                 {
                     "rel": "child",
                     "type": MimeTypes.json.value,
-                    "href": urljoin(str(request.base_url), f"{href_url}catalogs/{catalog_id}/catalogs/{sub_catalog["id"]}"),
+                    "href": urljoin(str(request.base_url), f"{href_url}catalogs/{catalog_id}/catalogs/{sub_catalog['id']}"),
                     "title": sub_catalog["title"],
                 }
             )
@@ -277,7 +277,7 @@ class CatalogSerializer(Serializer):
                 {
                     "rel": "child",
                     "type": MimeTypes.json.value,
-                    "href": urljoin(str(request.base_url), f"{href_url}catalogs/{catalog_id}/collections/{sub_collection["id"]}"),
+                    "href": urljoin(str(request.base_url), f"{href_url}catalogs/{catalog_id}/collections/{sub_collection['id']}"),
                     "title": sub_collection["title"],
                 }
             )
