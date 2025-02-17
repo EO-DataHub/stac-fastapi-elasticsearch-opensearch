@@ -211,7 +211,7 @@ class CoreClient(AsyncBaseCoreClient):
                     "rel": Relations.child.value,
                     "type": MimeTypes.json.value,
                     "title": catalog["title"],
-                    "href": urljoin(base_url, f"catalogs/{catalog["id"]}"),
+                    "href": urljoin(base_url, f"catalogs/{catalog['id']}"),
                 }
             )
 
@@ -333,7 +333,7 @@ class CoreClient(AsyncBaseCoreClient):
         ]
 
         if next_token:
-            next_link = PagingLinks(next=next_token, request=request).link_next()
+            next_link = await PagingLinks(next=next_token, request=request).link_next()
             links.append(next_link)
 
         return stac_types.Collections(
@@ -417,7 +417,7 @@ class CoreClient(AsyncBaseCoreClient):
         ]
 
         if next_token:
-            next_link = PagingLinks(next=next_token, request=request).link_next()
+            next_link = await PagingLinks(next=next_token, request=request).link_next()
             links.append(next_link)
 
         return stac_types.Catalogs(
@@ -554,7 +554,7 @@ class CoreClient(AsyncBaseCoreClient):
         ]
 
         if next_token:
-            next_link = PagingLinks(next=next_token, request=request).link_next()
+            next_link = await PagingLinks(next=next_token, request=request).link_next()
             links.append(next_link)
 
         return stac_types.ItemCollection(
@@ -907,7 +907,7 @@ class CoreClient(AsyncBaseCoreClient):
         ]
 
         if next_token:
-            next_link = PagingLinks(next=next_token, request=request).link_next()
+            next_link = await PagingLinks(next=next_token, request=request).link_next()
             links.append(next_link)
 
         return stac_types.ItemCollection(
@@ -1533,7 +1533,7 @@ class EsAsyncCollectionSearchClient(AsyncBaseCollectionSearchClient):
         ]
 
         if next_token:
-            next_link = PagingLinks(next=next_token, request=request).link_next()
+            next_link = await PagingLinks(next=next_token, request=request).link_next()
             links.append(next_link)
 
         return stac_types.Collections(
