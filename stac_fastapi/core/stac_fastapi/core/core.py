@@ -210,8 +210,8 @@ class CoreClient(AsyncBaseCoreClient):
                 {
                     "rel": Relations.child.value,
                     "type": MimeTypes.json.value,
-                    "title": catalog[1],
-                    "href": urljoin(base_url, f"catalogs/{catalog[0]}"),
+                    "title": catalog["title"],
+                    "href": urljoin(base_url, f"catalogs/{catalog["id"]}"),
                 }
             )
 
