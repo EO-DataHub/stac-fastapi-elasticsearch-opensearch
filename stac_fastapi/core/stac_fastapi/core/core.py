@@ -731,12 +731,12 @@ class CoreClient(AsyncBaseCoreClient):
                 for sort in sortby
             ]
 
-        if filter:
+        if kwargs.get("filter_expr"):
             base_args["filter-lang"] = "cql2-json"
             base_args["filter"] = orjson.loads(
-                unquote_plus(filter)
+                unquote_plus(kwargs["filter_expr"])
                 if filter_lang == "cql2-json"
-                else to_cql2(parse_cql2_text(filter))
+                else to_cql2(parse_cql2_text(kwargs["filter_expr"]))
             )
 
         if fields:
@@ -838,8 +838,8 @@ class CoreClient(AsyncBaseCoreClient):
                     )
 
         # only cql2_json is supported here
-        if hasattr(search_request, "filter"):
-            cql2_filter = getattr(search_request, "filter", None)
+        if hasattr(search_request, "filter_expr"):
+            cql2_filter = getattr(search_request, "filter_expr", None)
             try:
                 search = self.database.apply_cql2_filter(search, cql2_filter)
             except Exception as e:
