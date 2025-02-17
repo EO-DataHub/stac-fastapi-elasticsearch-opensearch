@@ -350,7 +350,7 @@ class PagingLinks(BaseLinks):
 
     next: Optional[str] = attr.ib(kw_only=True, default=None)
 
-    def link_next(self) -> Optional[Dict[str, Any]]:
+    async def link_next(self) -> Optional[Dict[str, Any]]:
         """Create link for next page."""
         if self.next is not None:
             method = self.request.method
@@ -374,12 +374,13 @@ class PagingLinks(BaseLinks):
                 netloc = parsed_url.netloc + "/"
                 query_url = self.url.split(netloc)[1]
                 new_url = self.resolve(query_url)
+                postbody = await self.request.json()
                 return {
                     "rel": Relations.next,
                     "type": MimeTypes.json,
                     "method": method,
                     "href": f"{new_url}",
-                    "body": {**self.request.postbody, "token": self.next},
+                    "body": {**postbody, "token": self.next},
                 }
 
         return None
