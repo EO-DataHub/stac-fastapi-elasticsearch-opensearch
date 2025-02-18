@@ -9,11 +9,13 @@ from urllib.parse import unquote_plus, urljoin
 
 import attr
 import orjson
+import stac_pydantic
 from fastapi import HTTPException, Request
 from overrides import overrides
 from pydantic import ValidationError
 from pygeofilter.backends.cql2_json import to_cql2
 from pygeofilter.parsers.cql2_text import parse as parse_cql2_text
+
 from stac_pydantic import Catalog, Collection, Item, ItemCollection
 from stac_pydantic.links import Relations
 from stac_pydantic.shared import BBox, MimeTypes
@@ -873,19 +875,15 @@ class CoreClient(AsyncBaseCoreClient):
             collection_ids=search_request.collections,
         )
 
-        query_include = set()
-        if self.extension_is_enabled("FieldsExtension"):
-            if search_request.query is not None:
-                query_include: Set[str] = set(
-                    [
-                        k if k in Settings.get().indexed_fields else f"properties.{k}"
-                        for k in search_request.query.keys()
-                    ]
-                )
-
-        fields = getattr(search_request, "fields", None)
-        include: Set[str] = fields.include if fields and fields.include else query_include
+        fields = (
+            getattr(search_request, "fields", None)
+            if self.extension_is_enabled("FieldsExtension")
+            else None
+        )
+        include: Set[str] = fields.include if fields and fields.include else set()
         exclude: Set[str] = fields.exclude if fields and fields.exclude else set()
+
+        include = include.union(fields.always_include)
 
         items = [
             filter_fields(
