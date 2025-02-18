@@ -236,6 +236,18 @@ class CatalogLinks(BaseLinks):
             type=MimeTypes.geojson.value,
             href=urljoin(self.base_url, f"{href_url}/collections"),
         )
+
+    def link_data(self) -> Dict[str, Any]:
+        """Create the `data` link (for collections)."""
+        if not self.catalog_path:
+            href_url = f"catalogs/{self.catalog_id}"
+        else:
+            href_url = f"catalogs/{self.catalog_path}/catalogs/{self.catalog_id}"
+        return dict(
+            rel="data",
+            type=MimeTypes.geojson.value,
+            href=urljoin(self.base_url, f"{href_url}/collections"),
+        )
     
     def link_catalogs(self) -> Dict[str, Any]:
         """Create the `catalogs` link."""
