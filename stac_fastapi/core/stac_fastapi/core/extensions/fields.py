@@ -27,6 +27,19 @@ class PostFieldsExtension(request.PostFieldsExtension):
     # )
     include: Optional[Set[str]] = set()
     exclude: Optional[Set[str]] = set()
+    always_include: Optional[Set[str]] = set(
+        {
+            "id",
+            "type",
+            "stac_version",
+            "geometry",
+            "bbox",
+            "links",
+            "assets",
+            "properties.datetime",
+            "collection",
+        }
+    )
 
 
 class FieldsExtensionPostRequest(BaseModel):
