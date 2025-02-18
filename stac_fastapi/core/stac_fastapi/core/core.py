@@ -36,6 +36,7 @@ from stac_fastapi.extensions.third_party.bulk_transactions import (
 )
 from stac_fastapi.types import stac as stac_types
 from stac_fastapi.types.access_policy import AccessPolicy
+from stac_fastapi.types.config import Settings
 from stac_fastapi.types.conformance import BASE_CONFORMANCE_CLASSES
 from stac_fastapi.types.core import AsyncBaseCoreClient, AsyncBaseTransactionsClient
 from stac_fastapi.types.extension import ApiExtension
@@ -872,12 +873,18 @@ class CoreClient(AsyncBaseCoreClient):
             collection_ids=search_request.collections,
         )
 
-        fields = (
-            getattr(search_request, "fields", None)
-            if self.extension_is_enabled("FieldsExtension")
-            else None
-        )
-        include: Set[str] = fields.include if fields and fields.include else set()
+        query_include = set()
+        if self.extension_is_enabled("FieldsExtension"):
+            if search_request.query is not None:
+                query_include: Set[str] = set(
+                    [
+                        k if k in Settings.get().indexed_fields else f"properties.{k}"
+                        for k in search_request.query.keys()
+                    ]
+                )
+
+        fields = getattr(search_request, "fields", None)
+        include: Set[str] = fields.include if fields and fields.include else query_include
         exclude: Set[str] = fields.exclude if fields and fields.exclude else set()
 
         items = [
