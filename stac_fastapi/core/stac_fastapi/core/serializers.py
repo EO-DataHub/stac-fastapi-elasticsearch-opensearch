@@ -239,7 +239,6 @@ class CatalogSerializer(Serializer):
         catalog.setdefault("title", "")
         catalog.setdefault("description", "")
 
-        # Set conformance classes
         catalog["conformsTo"] = conformance_classes
 
         # Create the catalog links using CatalogLinks
