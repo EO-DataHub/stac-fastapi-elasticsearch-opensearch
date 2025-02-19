@@ -9,7 +9,6 @@ from copy import deepcopy
 from typing import Any, Dict, Iterable, List, Optional, Protocol, Tuple, Type, Union
 
 import attr
-import orjson
 from elasticsearch_dsl import Q, Search
 from starlette.requests import Request
 
@@ -25,8 +24,6 @@ from stac_fastapi.elasticsearch.config import (
 from stac_fastapi.types.access_policy import AccessPolicy
 from stac_fastapi.types.errors import ConflictError, NotFoundError
 from stac_fastapi.types.stac import Catalog, Collection, Item
-from pygeofilter.backends.cql2_json import to_cql2
-from pygeofilter.parsers.cql2_text import parse as parse_cql2_text
 
 logger = logging.getLogger(__name__)
 
@@ -295,6 +292,7 @@ async def create_collection_index() -> None:
         aliases={COLLECTIONS_INDEX: {}},
     )
     await client.close()
+
 
 async def delete_catalogs_by_id_prefix(prefix: str, refresh: bool = True):
     client = AsyncElasticsearchSettings().create_client
