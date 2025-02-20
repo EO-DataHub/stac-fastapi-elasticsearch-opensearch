@@ -22,9 +22,11 @@ from stac_fastapi.elasticsearch.config import (
     ElasticsearchSettings as SyncElasticsearchSettings,
 )
 from stac_fastapi.types.access_policy import AccessPolicy
+from stac_fastapi.types.conformance import BASE_CONFORMANCE_CLASSES
 from stac_fastapi.types.errors import ConflictError, NotFoundError
 from stac_fastapi.types.stac import Catalog, Collection, Item
 
+# Get the logger for this module
 logger = logging.getLogger(__name__)
 
 NumType = Union[float, int]
@@ -293,6 +295,22 @@ async def create_collection_index() -> None:
     )
     await client.close()
 
+async def create_item_index():
+    """
+    Create the index for Items. The settings of the index template will be used implicitly.
+    Args:
+        collection_id (str): Collection identifier.
+    Returns:
+        None
+    """
+    client = AsyncElasticsearchSettings().create_client
+
+    await client.options(ignore_status=400).indices.create(
+        index=f"{ITEMS_INDEX}-000001",
+        aliases={ITEMS_INDEX: {}},
+    )
+    await client.close()
+
 
 async def delete_catalogs_by_id_prefix(prefix: str, refresh: bool = True):
     client = AsyncElasticsearchSettings().create_client
@@ -439,6 +457,10 @@ class DatabaseLogic:
     )
     catalog_serializer: Type[CatalogSerializer] = attr.ib(default=CatalogSerializer)
 
+    base_conformance_classes: List[str] = attr.ib(
+        factory=lambda: BASE_CONFORMANCE_CLASSES
+    )
+
     extensions: List[str] = attr.ib(default=attr.Factory(list))
 
     aggregation_mapping: Dict[str, Dict[str, Any]] = {
@@ -514,9 +536,9 @@ class DatabaseLogic:
 
     """Utils"""
 
-    def generate_cat_path(self, cat_path: str, collection_id: str = None) -> str:
-        if cat_path == "root":
-            return "root"
+    def generate_cat_path(self, cat_path: Optional[str], collection_id: str = None) -> str:
+        if cat_path == "root" or cat_path == None:
+            return ""
         cat_path = cat_path.replace("catalogs/", "")
         if cat_path.endswith("/"):
             cat_path = cat_path[:-1]
@@ -533,7 +555,7 @@ class DatabaseLogic:
             cat_path = cat_path + "/"
         else:
             catalog_id = cat_path
-            cat_path = ""
+            cat_path = "root"
 
         gen_cat_path = self.generate_cat_path(cat_path)
         if gen_cat_path:
@@ -549,6 +571,7 @@ class DatabaseLogic:
 
         # Get parent catalog
         try:
+            logger.info(f"Getting catalog {parent_id} in index {CATALOGS_INDEX}")
             parent_catalog = await self.client.get(index=CATALOGS_INDEX, id=parent_id)
         except exceptions.NotFoundError:
             raise NotFoundError(f"Catalog {catalog_id} not found")
@@ -723,6 +746,9 @@ class DatabaseLogic:
         Returns:
             A tuple of (collections, next pagination token if any).
         """
+
+        logger.info(f"Getting all collections in catalog '{cat_path}'")
+        
         search_after = None
         if token:
             search_after = [token]
@@ -730,8 +756,7 @@ class DatabaseLogic:
         search = self.make_search()
         search = self.apply_access_filter(search=search, workspaces=workspaces)
 
-        if cat_path != None:
-            search = self.apply_catalogs_filter(search=search, catalog_path=cat_path)
+        search = self.apply_recursive_catalogs_filter(search=search, catalog_path=cat_path)
             
         query = search.query.to_dict() if search.query else None
 
@@ -834,7 +859,7 @@ class DatabaseLogic:
     
     async def get_all_sub_collections(
         self, cat_path: str, workspaces: Optional[List[str]],
-    ) -> List[str]:
+    ) -> List[dict]:
         """Retrieve a list of all collections from Elasticsearch.
 
         Args:
@@ -845,17 +870,10 @@ class DatabaseLogic:
             A tuple of (collections, next pagination token if any).
         """
 
-        if cat_path:
-            if cat_path.endswith("/catalogs"):
-                cat_path = cat_path.rsplit("/", 1)[0]
-            elif cat_path.endswith("catalogs"):
-                cat_path = ""
-
         search = self.make_search()
         search = self.apply_access_filter(search=search, workspaces=workspaces)
 
-        if cat_path != None:
-            search = self.apply_catalogs_filter(search=search, catalog_path=cat_path)
+        search = self.apply_catalogs_filter(search=search, catalog_path=cat_path)
             
         query = search.query.to_dict() if search.query else None
 
@@ -867,13 +885,13 @@ class DatabaseLogic:
         )
 
         hits = response["hits"]["hits"]
-        collections = [(hit["_source"]["id"], hit["_source"].get("title", hit["_source"]["id"]), hit["_source"]["_sfapi_internal"]["cat_path"]) for hit in hits]
+        collections = [{"id": hit["_source"]["id"], "title": hit["_source"].get("title", hit["_source"]["id"])} for hit in hits]
 
         return collections
     
     async def get_all_sub_catalogs(
         self, cat_path: str, workspaces: Optional[List[str]]
-    ) -> List[str]:
+    ) -> List[dict]:
         """Retrieve a list of all catalogs from Elasticsearch.
 
         Args:
@@ -884,17 +902,10 @@ class DatabaseLogic:
             A tuple of (catalogs, next pagination token if any).
         """
 
-        if cat_path:
-            if cat_path.endswith("/catalogs"):
-                cat_path = cat_path.rsplit("/", 1)[0]
-            elif cat_path.endswith("catalogs"):
-                cat_path = ""
-
         search = self.make_search()
         search = self.apply_access_filter(search=search, workspaces=workspaces)
 
-        if cat_path != None:
-            search = self.apply_catalogs_filter(search=search, catalog_path=cat_path)
+        search = self.apply_catalogs_filter(search=search, catalog_path=cat_path)
 
         query = search.query.to_dict() if search.query else None
 
@@ -906,12 +917,12 @@ class DatabaseLogic:
         )
 
         hits = response["hits"]["hits"]
-        catalogs = [(hit["_source"]["id"], hit["_source"].get("title", hit["_source"]["id"]), hit["_source"]["_sfapi_internal"]["cat_path"]) for hit in hits]
+        catalogs = [{"id": hit["_source"]["id"], "title": hit["_source"].get("title", hit["_source"]["id"])} for hit in hits]
 
         return catalogs
     
     async def get_all_catalogs(
-        self, cat_path: Optional[str], token: Optional[str], limit: int, request: Request, workspaces: Optional[List[str]]
+        self, cat_path: Optional[str], token: Optional[str], limit: int, request: Request, conformance_classes: List[str], workspaces: Optional[List[str]]
     ) -> Tuple[List[Dict[str, Any]], Optional[str]]:
         """Retrieve a list of all catalogs from Elasticsearch, supporting pagination.
 
@@ -923,6 +934,8 @@ class DatabaseLogic:
             A tuple of (catalogs, next pagination token if any).
         """
 
+        logger.info(f"Getting all catalogs in catalog '{cat_path}'")
+
         search_after = None
         if token:
             search_after = [token]
@@ -932,12 +945,13 @@ class DatabaseLogic:
                 cat_path = cat_path.rsplit("/", 1)[0]
             elif cat_path.endswith("catalogs"):
                 cat_path = ""
+        else:
+            cat_path = ""
 
         search = self.make_search()
         search = self.apply_access_filter(search=search, workspaces=workspaces)
 
-        if cat_path != None: # need to include "" cat path to only return top-level catalogs
-            search = self.apply_catalogs_filter(search=search, catalog_path=cat_path)
+        search = self.apply_recursive_catalogs_filter(search=search, catalog_path=cat_path)
 
         query = search.query.to_dict() if search.query else None
 
@@ -979,9 +993,10 @@ class DatabaseLogic:
             child_cat_path = base_cat_path + hit["_source"]["id"]
             sub_catalogs = await self.get_all_sub_catalogs(cat_path=child_cat_path, workspaces=workspaces)
             sub_collections = await self.get_all_sub_collections(cat_path=child_cat_path, workspaces=workspaces)
+            logger.info(f"Formatting catalog with id {hit['_id']}")
             catalogs.append(
                 self.catalog_serializer.db_to_stac(
-                    catalog=hit["_source"], sub_catalogs=sub_catalogs, sub_collections=sub_collections, request=request, extensions=self.extensions
+                    catalog=hit["_source"], sub_catalogs=sub_catalogs, sub_collections=sub_collections, request=request, conformance_classes=conformance_classes, extensions=self.extensions
                 )
             )
 
@@ -1024,11 +1039,14 @@ class DatabaseLogic:
             with the index for the Collection as the target index and the combined `mk_item_id` as the document id.
         """
 
+        logger.info(f"Getting item {item_id} in collection {collection_id} in catalog {cat_path}")
+
         gen_cat_path = self.generate_cat_path(cat_path, collection_id)
 
         combi_item_path = gen_cat_path + "||" + item_id
 
         try:
+            logger.info(f"Getting item {combi_item_path} in index {ITEMS_INDEX}")
             item = await self.client.get(
                 index=ITEMS_INDEX,
                 id=combi_item_path,
@@ -1070,6 +1088,21 @@ class DatabaseLogic:
         """Database logic to search STAC catalog path."""
         cat_path = self.generate_cat_path(catalog_path)
         return search.filter("term", **{"_sfapi_internal.cat_path": cat_path})
+
+    def apply_recursive_catalogs_filter(self, search: Search, catalog_path: Optional[str]):
+        """Database logic to search STAC catalog path."""
+        cat_path = self.generate_cat_path(catalog_path)
+        if cat_path:
+            rec_cat_path = cat_path + ",*"
+        else:
+            return search
+        return search.filter(
+            "bool",
+            should=[
+                {"wildcard": {"_sfapi_internal.cat_path": rec_cat_path}},
+                {"term": {"_sfapi_internal.cat_path": cat_path}}
+            ]
+        )
     
     @staticmethod
     def apply_access_filter(search: Search, workspaces: List[str]):
@@ -1495,14 +1528,13 @@ class DatabaseLogic:
 
         search = self.apply_access_filter(search=search, workspaces=workspaces)
 
-        if cat_path:
-            search = self.apply_catalogs_filter(search=search, catalog_path=cat_path)
+        search = self.apply_recursive_catalogs_filter(search=search, catalog_path=cat_path)
 
         query = search.query.to_dict() if search.query else None
         if query:
             search_body["query"] = query
 
-        logger.debug("Aggregations: %s", aggregations)
+        logger.debug(f"Aggregations: {aggregations}")
 
         def _fill_aggregation_parameters(name: str, agg: dict) -> dict:
             [key] = agg.keys()
@@ -1648,6 +1680,7 @@ class DatabaseLogic:
             raise ConflictError(f"Item {item_id} already exists in Collection {collection_id}")
 
         try:
+            logger.info(f"Getting parent collection {combi_collection_id}, in index {COLLECTIONS_INDEX}")
             parent_collection = await self.client.get(index=COLLECTIONS_INDEX, id=combi_collection_id)
             parent_collection = parent_collection["_source"]
         except exceptions.NotFoundError:
@@ -1667,6 +1700,8 @@ class DatabaseLogic:
         item["_sfapi_internal"].update({"owner": workspace})
         item["_sfapi_internal"].update({"exp_public": access_control.get("exp_public", False)}) 
         item["_sfapi_internal"].update({"inf_public": False}) # from children (so always False)
+
+        logger.info(f"Creating item {combi_item_id}")
 
         es_resp = await self.client.index(
             index=ITEMS_INDEX,
@@ -1698,12 +1733,14 @@ class DatabaseLogic:
 
         combi_item_id = self.generate_cat_path(cat_path, collection_id) + "||" + item_id
         gen_cat_path = self.generate_cat_path(cat_path)
+
         combi_collection_id = gen_cat_path + "||" + collection_id
 
         if not await self.client.exists(index=ITEMS_INDEX, id=combi_item_id):
             raise NotFoundError(f"Item {item_id} not found in Collection {collection_id}")
 
         try:
+            logger.info(f"Getting parent collection {combi_collection_id}, in index {COLLECTIONS_INDEX}")
             parent_collection = await self.client.get(index=COLLECTIONS_INDEX, id=combi_collection_id)
             parent_collection = parent_collection["_source"]
         except exceptions.NotFoundError:
@@ -1756,12 +1793,16 @@ class DatabaseLogic:
             cat_path = "root"
         cat_path = cat_path[:-9] if cat_path.endswith("/catalogs") else cat_path # remove trailing /catalogs
         gen_cat_path = self.generate_cat_path(cat_path)
+
         if gen_cat_path:
             combi_cat_path = gen_cat_path + "||" + catalog_id
         else:
             combi_cat_path = catalog_id
 
+        logger.info(f"Getting catalog {combi_cat_path}, in index {CATALOGS_INDEX}")
+
         try:
+            logger.info(f"Getting catalog {combi_cat_path}, in index {CATALOGS_INDEX}")
             catalog = await self.client.get(index=CATALOGS_INDEX, id=combi_cat_path)
             catalog = catalog["_source"]
         except exceptions.NotFoundError:
@@ -1801,7 +1842,6 @@ class DatabaseLogic:
         if cat_path == "root":
             combi_cat_path = catalog_id
         else:
-            catalog_id = catalog["id"]
             combi_cat_path = gen_cat_path + "||" + catalog_id
 
         if await self.client.exists(index=CATALOGS_INDEX, id=combi_cat_path):
@@ -1813,6 +1853,7 @@ class DatabaseLogic:
         if cat_path != "root":
             parent_path, parent_id = self.generate_parent_id(cat_path)
             try:
+                logger.info(f"Getting parent catalog {parent_path}, in index {CATALOGS_INDEX}")
                 parent_catalog = await self.client.get(index=CATALOGS_INDEX, id=parent_path)
                 parent_catalog = parent_catalog["_source"]
             except exceptions.NotFoundError:
@@ -1842,14 +1883,14 @@ class DatabaseLogic:
         catalog["_sfapi_internal"].update({"inf_public": False}) # inferred public setting (from children)
         catalog["_sfapi_internal"].update({"count_public_children": 0}) # no children to infer from yet
 
+        logger.info(f"Creating Catalog with ID {combi_cat_path}")
+
         await self.client.index(
             index=CATALOGS_INDEX,
             id=combi_cat_path,
             document=catalog,
             refresh=refresh,
         )
-
-        #await create_collection_index(catalog_id)
 
     async def update_catalog(
         self, cat_path: str, catalog: Catalog, workspace: str, refresh: bool = False
@@ -1878,14 +1919,16 @@ class DatabaseLogic:
             cat_path = cat_path + "/"
         else:
             catalog_id = cat_path
-            cat_path = ""
+            cat_path = "root"
         gen_cat_path = self.generate_cat_path(cat_path)
+
         if gen_cat_path:
-            combi_cat_path = gen_cat_path + "||" + catalog["id"]
+            combi_cat_path = gen_cat_path + "||" + catalog_id
         else:
-            combi_cat_path = catalog["id"]
+            combi_cat_path = catalog_id
 
         try:
+            logger.info(f"Getting catalog {combi_cat_path}, in index {CATALOGS_INDEX}")
             prev_catalog = await self.client.get(index=CATALOGS_INDEX, id=combi_cat_path)
         except exceptions.NotFoundError:
             raise NotFoundError(f"Catalog {catalog_id} not found")
@@ -1955,14 +1998,15 @@ class DatabaseLogic:
             parent_cat_path = parent_cat_path + "/"
         else:
             catalog_id = cat_path
-            parent_cat_path = ""
-        gen_par_cat_path = self.generate_cat_path(parent_cat_path)
-        if gen_par_cat_path:
-            combi_cat_path = gen_par_cat_path + "||" + catalog_id
+            parent_cat_path = "root"
+        gen_parent_cat_path = self.generate_cat_path(parent_cat_path)
+        if gen_parent_cat_path:
+            combi_cat_path = gen_parent_cat_path + "||" + catalog_id
         else:
             combi_cat_path = catalog_id
 
         try:
+            logger.info(f"Getting catalog {combi_cat_path}, in index {CATALOGS_INDEX}")
             prev_catalog = await self.client.get(index=CATALOGS_INDEX, id=combi_cat_path)
         except exceptions.NotFoundError:
             raise NotFoundError(f"Catalog {catalog_id} not found")
@@ -1997,14 +2041,7 @@ class DatabaseLogic:
         await self.update_children_access_catalogs(prefix=gen_cat_path, public=access_policy.get("public", False))
         await self.update_children_access_collections(prefix=gen_cat_path, public=access_policy.get("public", False))
         await self.update_children_access_items(prefix=gen_cat_path, public=access_policy.get("public", False))
-        
-        
-        # await self.client.index(
-        #     index=COLLECTIONS_INDEX,
-        #     id=combi_cat_path,
-        #     document=prev_catalog,
-        #     refresh=refresh,
-        # )
+
 
     async def delete_catalog(self, cat_path: str, workspace: str, refresh: bool = False):
         """Delete a catalog from the database.
@@ -2027,11 +2064,12 @@ class DatabaseLogic:
             parent_cat_path, catalog_id = cat_path.rsplit("/", 1)
         else:
             catalog_id = cat_path
-            parent_cat_path = ""
+            parent_cat_path = "root"
         parent_cat_path = parent_cat_path[:-9] if parent_cat_path.endswith("/catalogs") else parent_cat_path # remove trailing /catalogs
-        hashed_parent_cat_path = self.generate_cat_path(parent_cat_path) 
-        if hashed_parent_cat_path:
-            combi_cat_path = hashed_parent_cat_path + "||" + catalog_id
+        gen_parent_cat_path = self.generate_cat_path(parent_cat_path)
+        
+        if gen_parent_cat_path:
+            combi_cat_path = gen_parent_cat_path + "||" + catalog_id
         else:
             combi_cat_path = catalog_id
 
@@ -2039,6 +2077,7 @@ class DatabaseLogic:
 
         # Check if workspace has permissions to delete
         try:
+            logger.info(f"Getting catalog {combi_cat_path}, in index {CATALOGS_INDEX}")
             prev_catalog = await self.client.get(index=CATALOGS_INDEX, id=combi_cat_path)
             prev_catalog = prev_catalog["_source"]
         except exceptions.NotFoundError:
@@ -2079,6 +2118,7 @@ class DatabaseLogic:
         combi_collection_id = gen_cat_path + "||" + collection_id
 
         try:
+            logger.info(f"Getting collection {combi_collection_id}, in index {COLLECTIONS_INDEX}")
             collection = await self.client.get(index=COLLECTIONS_INDEX, id=combi_collection_id)
             collection = collection["_source"]
         except exceptions.NotFoundError:
@@ -2139,6 +2179,7 @@ class DatabaseLogic:
         if cat_path != "root":
             parent_path, parent_id = self.generate_parent_id(cat_path)
             try:
+                logger.info(f"Getting parent catalog {parent_path}, in index {CATALOGS_INDEX}")
                 parent_catalog = await self.client.get(index=CATALOGS_INDEX, id=parent_path)
                 parent_catalog = parent_catalog["_source"]
             except exceptions.NotFoundError:
@@ -2166,14 +2207,14 @@ class DatabaseLogic:
 
         collection = self.add_collection_search_fields(collection)
 
+        logger.info(f"Creating Collection with ID {combi_collection_id}")
+
         await self.client.index(
             index=COLLECTIONS_INDEX,
             id=combi_collection_id,
             document=collection,
             refresh=refresh,
         )
-
-        # await create_item_index(collection_id)
 
     async def update_collection(
         self, cat_path: str, collection_id: str, collection: Collection, workspace: str, refresh: bool = False
@@ -2202,6 +2243,7 @@ class DatabaseLogic:
         combi_collection_id = gen_cat_path + "||" + collection_id
         
         try:
+            logger.info(f"Getting collection {combi_collection_id}, in index {COLLECTIONS_INDEX}")
             prev_collection = await self.client.get(index=COLLECTIONS_INDEX, id=combi_collection_id)
             prev_collection = prev_collection["_source"]
         except exceptions.NotFoundError:
@@ -2273,6 +2315,7 @@ class DatabaseLogic:
 
         # Check if workspace has permissions to update collection access control
         try:
+            logger.info(f"Getting collection {combi_collection_id}, in index {COLLECTIONS_INDEX}")
             prev_collection = await self.client.get(index=COLLECTIONS_INDEX, id=combi_collection_id)
             prev_collection = prev_collection["_source"]
         except exceptions.NotFoundError:
@@ -2319,6 +2362,7 @@ class DatabaseLogic:
 
         # Check if workspace has permissions to update collection
         try:
+            logger.info(f"Getting collection {combi_collection_id}, in index {COLLECTIONS_INDEX}")
             prev_collection = await self.client.get(index=COLLECTIONS_INDEX, id=combi_collection_id)
             prev_collection = prev_collection["_source"]
         except exceptions.NotFoundError:

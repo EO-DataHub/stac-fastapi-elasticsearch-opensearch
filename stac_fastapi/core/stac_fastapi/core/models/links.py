@@ -236,6 +236,18 @@ class CatalogLinks(BaseLinks):
             type=MimeTypes.geojson.value,
             href=urljoin(self.base_url, f"{href_url}/collections"),
         )
+
+    def link_data(self) -> Dict[str, Any]:
+        """Create the `data` link (for collections)."""
+        if not self.catalog_path:
+            href_url = f"catalogs/{self.catalog_id}"
+        else:
+            href_url = f"catalogs/{self.catalog_path}/catalogs/{self.catalog_id}"
+        return dict(
+            rel="data",
+            type=MimeTypes.geojson.value,
+            href=urljoin(self.base_url, f"{href_url}/collections"),
+        )
     
     def link_catalogs(self) -> Dict[str, Any]:
         """Create the `catalogs` link."""
@@ -350,7 +362,7 @@ class PagingLinks(BaseLinks):
 
     next: Optional[str] = attr.ib(kw_only=True, default=None)
 
-    def link_next(self) -> Optional[Dict[str, Any]]:
+    async def link_next(self) -> Optional[Dict[str, Any]]:
         """Create link for next page."""
         if self.next is not None:
             method = self.request.method
@@ -374,12 +386,13 @@ class PagingLinks(BaseLinks):
                 netloc = parsed_url.netloc + "/"
                 query_url = self.url.split(netloc)[1]
                 new_url = self.resolve(query_url)
+                postbody = await self.request.json()
                 return {
                     "rel": Relations.next,
                     "type": MimeTypes.json,
                     "method": method,
                     "href": f"{new_url}",
-                    "body": {**self.request.postbody, "token": self.next},
+                    "body": {**postbody, "token": self.next},
                 }
 
         return None

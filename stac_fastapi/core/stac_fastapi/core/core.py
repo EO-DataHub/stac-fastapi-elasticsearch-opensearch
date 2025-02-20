@@ -9,11 +9,13 @@ from urllib.parse import unquote_plus, urljoin
 
 import attr
 import orjson
+import stac_pydantic
 from fastapi import HTTPException, Request
 from overrides import overrides
 from pydantic import ValidationError
 from pygeofilter.backends.cql2_json import to_cql2
 from pygeofilter.parsers.cql2_text import parse as parse_cql2_text
+
 from stac_pydantic import Catalog, Collection, Item, ItemCollection
 from stac_pydantic.links import Relations
 from stac_pydantic.shared import BBox, MimeTypes
@@ -26,6 +28,7 @@ from stac_fastapi.core.serializers import CatalogSerializer, CollectionSerialize
 from stac_fastapi.core.session import Session
 from stac_fastapi.core.utilities import filter_fields
 from stac_fastapi.extensions.core.filter.client import AsyncBaseFiltersClient
+from stac_fastapi.extensions.core.filter.request import FilterLang
 from stac_fastapi.extensions.core.collection_search.client import AsyncBaseCollectionSearchClient
 from stac_fastapi.extensions.core.collection_search.request import BaseCollectionSearchPostRequest
 from stac_fastapi.extensions.third_party.bulk_transactions import (
@@ -35,6 +38,7 @@ from stac_fastapi.extensions.third_party.bulk_transactions import (
 )
 from stac_fastapi.types import stac as stac_types
 from stac_fastapi.types.access_policy import AccessPolicy
+from stac_fastapi.types.config import Settings
 from stac_fastapi.types.conformance import BASE_CONFORMANCE_CLASSES
 from stac_fastapi.types.core import AsyncBaseCoreClient, AsyncBaseTransactionsClient
 from stac_fastapi.types.extension import ApiExtension
@@ -165,6 +169,7 @@ class CoreClient(AsyncBaseCoreClient):
         """
         logger.info("Getting landing page")
         request: Request = kwargs["request"]
+        workspaces = auth_headers.get("X-Workspaces", [])
         base_url = get_base_url(request)
         landing_page = self._landing_page(
             base_url=base_url,
@@ -202,13 +207,13 @@ class CoreClient(AsyncBaseCoreClient):
                 ]
             )
 
-        catalogs = await self.all_catalogs(request=kwargs["request"],  auth_headers=auth_headers, cat_path="root")
-        for catalog in catalogs["catalogs"]:
+        catalogs = await self.database.get_all_sub_catalogs(cat_path="", workspaces=workspaces)
+        for catalog in catalogs:
             landing_page["links"].append(
                 {
                     "rel": Relations.child.value,
                     "type": MimeTypes.json.value,
-                    "title": catalog.get("title") or catalog.get("id"),
+                    "title": catalog["title"],
                     "href": urljoin(base_url, f"catalogs/{catalog['id']}"),
                 }
             )
@@ -281,7 +286,7 @@ class CoreClient(AsyncBaseCoreClient):
         )
 
         if cat_path:
-            search = self.database.apply_catalogs_filter(
+            search = self.database.apply_recursive_catalogs_filter(
                     search=search, catalog_path=cat_path
                 )
 
@@ -331,7 +336,7 @@ class CoreClient(AsyncBaseCoreClient):
         ]
 
         if next_token:
-            next_link = PagingLinks(next=next_token, request=request).link_next()
+            next_link = await PagingLinks(next=next_token, request=request).link_next()
             links.append(next_link)
 
         return stac_types.Collections(
@@ -376,6 +381,7 @@ class CoreClient(AsyncBaseCoreClient):
         Args:
             auth_headers (dict): The authentication headers.
             cat_path (str): The path of the parent catalog containing the catalogs.
+            root_only (bool): If True, only the top-level catalogs will be returned.
             **kwargs: Keyword arguments from the request.
 
         Returns:
@@ -388,12 +394,12 @@ class CoreClient(AsyncBaseCoreClient):
         limit = int(request.query_params.get("limit", 10))
         token = request.query_params.get("token")
 
-        # If root_only we only want the top-level catalogs returned
-        if cat_path == "root":
+        # We want all the top-level catalogs returned
+        if cat_path == "":
             limit = 10_000
 
         catalogs, maybe_count, next_token = await self.database.get_all_catalogs(
-            cat_path=cat_path, token=token, limit=limit, request=request, workspaces=workspaces,
+            cat_path=cat_path, token=token, limit=limit, request=request, workspaces=workspaces, conformance_classes=self.conformance_classes(),
         )
 
         if not cat_path:
@@ -414,7 +420,7 @@ class CoreClient(AsyncBaseCoreClient):
         ]
 
         if next_token:
-            next_link = PagingLinks(next=next_token, request=request).link_next()
+            next_link = await PagingLinks(next=next_token, request=request).link_next()
             links.append(next_link)
 
         return stac_types.Catalogs(
@@ -455,6 +461,7 @@ class CoreClient(AsyncBaseCoreClient):
             sub_catalogs=sub_catalogs,
             sub_collections=sub_collections,
             request=request,
+            conformance_classes=self.conformance_classes(),
             extensions=[type(ext).__name__ for ext in self.extensions],
         )
 
@@ -493,7 +500,6 @@ class CoreClient(AsyncBaseCoreClient):
         request: Request = kwargs["request"]
         workspaces = auth_headers.get("X-Workspaces", [])
         token = request.query_params.get("token")
-
         base_url = str(request.base_url)
 
         collection = await self.get_collection(
@@ -539,7 +545,20 @@ class CoreClient(AsyncBaseCoreClient):
             self.item_serializer.db_to_stac(item, base_url=base_url) for item in items
         ]
 
-        links = await PagingLinks(request=request, next=next_token).get_links()
+        catalogs_href_url = f"catalogs/{cat_path}/collections/{collection_id}/items"
+
+        links = [
+            {"rel": Relations.root.value, "type": MimeTypes.json, "href": base_url},
+            {
+                "rel": Relations.self.value,
+                "type": MimeTypes.json,
+                "href": urljoin(base_url, catalogs_href_url),
+            },
+        ]
+
+        if next_token:
+            next_link = await PagingLinks(next=next_token, request=request).link_next()
+            links.append(next_link)
 
         return stac_types.ItemCollection(
             type="FeatureCollection",
@@ -715,12 +734,12 @@ class CoreClient(AsyncBaseCoreClient):
                 for sort in sortby
             ]
 
-        if filter:
+        if kwargs.get("filter_expr"):
             base_args["filter-lang"] = "cql2-json"
             base_args["filter"] = orjson.loads(
-                unquote_plus(filter)
+                unquote_plus(kwargs["filter_expr"])
                 if filter_lang == "cql2-json"
-                else to_cql2(parse_cql2_text(filter))
+                else to_cql2(parse_cql2_text(kwargs["filter_expr"]))
             )
 
         if fields:
@@ -784,7 +803,7 @@ class CoreClient(AsyncBaseCoreClient):
             )
 
         if cat_path:
-            search = self.database.apply_catalogs_filter(
+            search = self.database.apply_recursive_catalogs_filter(
                     search=search, catalog_path=cat_path
                 )
 
@@ -822,8 +841,8 @@ class CoreClient(AsyncBaseCoreClient):
                     )
 
         # only cql2_json is supported here
-        if hasattr(search_request, "filter"):
-            cql2_filter = getattr(search_request, "filter", None)
+        if hasattr(search_request, "filter_expr"):
+            cql2_filter = getattr(search_request, "filter_expr", None)
             try:
                 search = self.database.apply_cql2_filter(search, cql2_filter)
             except Exception as e:
@@ -864,6 +883,8 @@ class CoreClient(AsyncBaseCoreClient):
         include: Set[str] = fields.include if fields and fields.include else set()
         exclude: Set[str] = fields.exclude if fields and fields.exclude else set()
 
+        include = include.union(fields.always_include)
+
         items = [
             filter_fields(
                 self.item_serializer.db_to_stac(item, base_url=base_url),
@@ -891,7 +912,7 @@ class CoreClient(AsyncBaseCoreClient):
         ]
 
         if next_token:
-            next_link = PagingLinks(next=next_token, request=request).link_next()
+            next_link = await PagingLinks(next=next_token, request=request).link_next()
             links.append(next_link)
 
         return stac_types.ItemCollection(
@@ -1077,7 +1098,7 @@ class TransactionsClient(AsyncBaseTransactionsClient):
     @overrides
     async def update_collection_access_policy(
         self, cat_path: str, collection_id: str, access_policy: AccessPolicy, workspace: str, **kwargs
-    ) -> str:
+    ) -> None:
         """
         Update a collection access policy.
 
@@ -1105,7 +1126,7 @@ class TransactionsClient(AsyncBaseTransactionsClient):
             cat_path=cat_path, collection_id=collection_id, access_policy=access_policy, workspace=workspace
         )
 
-        return "Updated access policy"
+        return None
 
     @overrides
     async def delete_collection(
@@ -1199,7 +1220,7 @@ class TransactionsClient(AsyncBaseTransactionsClient):
     @overrides
     async def update_catalog_access_policy(
         self, cat_path: str, access_policy: AccessPolicy, workspace: str, **kwargs
-    ) -> str:
+    ) -> None:
         """
         Update a catalog access policy.
 
@@ -1228,7 +1249,7 @@ class TransactionsClient(AsyncBaseTransactionsClient):
 
         catalog = await self.database.find_catalog(cat_path=cat_path, workspaces=[workspace], user_is_authenticated=True)
 
-        return catalog
+        return None
 
     @overrides
     async def delete_catalog(
@@ -1462,7 +1483,7 @@ class EsAsyncCollectionSearchClient(AsyncBaseCollectionSearchClient):
         )
 
         if cat_path:
-            search = self.database.apply_catalogs_filter(
+            search = self.database.apply_recursive_catalogs_filter(
                     search=search, catalog_path=cat_path
                 )
 
@@ -1517,7 +1538,7 @@ class EsAsyncCollectionSearchClient(AsyncBaseCollectionSearchClient):
         ]
 
         if next_token:
-            next_link = PagingLinks(next=next_token, request=request).link_next()
+            next_link = await PagingLinks(next=next_token, request=request).link_next()
             links.append(next_link)
 
         return stac_types.Collections(
