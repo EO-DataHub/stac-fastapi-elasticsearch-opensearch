@@ -1429,13 +1429,11 @@ class EsAsyncBaseFiltersClient(AsyncBaseFiltersClient):
         Supported filter_lang values: "cql2-json" and "cql2-text" (or "cql-json").
         
         Args:
-            search (Search): The search object to apply the filter to
             _filter (Union[str, dict]): The filter to decode
             filter_lang (str): The language of the filter
-            database (BaseDatabaseLogic): The database instance to apply the filter
 
         Returns:
-            Search: The search object with the filter applied
+            normalized filter: The normalized filter object
 
         Raises:
             HTTPException: If the filter is invalid or unsupported
