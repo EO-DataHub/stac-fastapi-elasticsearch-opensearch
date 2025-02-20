@@ -253,6 +253,8 @@ class CoreClient(AsyncBaseCoreClient):
         limit: Optional[int] = 10,
         token: Optional[str] = None,
         q: Optional[List[str]] = None,
+        filter: Optional[Union[str, dict]] = None, 
+        filter_lang: Optional[str] = None,
         **kwargs) -> stac_types.Collections:
         """Read all collections from the database.
 
@@ -306,6 +308,11 @@ class CoreClient(AsyncBaseCoreClient):
 
         if q:
             search = self.database.apply_keyword_collections_filter(search=search, q=q)
+        
+        if filter:
+            filter_lang = filter_lang or "cql2-text"
+            normalized_filter = EsAsyncBaseFiltersClient.decode_cql2_filter(filter,filter_lang)
+            search = self.database.apply_cql2_filter(search, normalized_filter)
 
         collections, maybe_count, next_token = await self.database.execute_collection_search(
             search=search,
@@ -1435,6 +1442,45 @@ class EsAsyncBaseFiltersClient(AsyncBaseFiltersClient):
             },
             "additionalProperties": True,
         }
+    
+    @staticmethod
+    def decode_cql2_filter(_filter: Union[str, dict], filter_lang: str) -> Union[Dict[str, Any], str]:
+        """
+        Decode the _filter using the given filter_lang and apply it.
+        Supported filter_lang values: "cql2-json" and "cql2-text" (or "cql-json").
+        
+        Args:
+            _filter (Union[str, dict]): The filter to decode
+            filter_lang (str): The language of the filter
+
+        Returns:
+            normalized filter: The normalized filter object
+
+        Raises:
+            HTTPException: If the filter is invalid or unsupported
+        """
+        # Determine filter_obj by checking _filter's type
+        filter_obj = None
+        if isinstance(_filter, str):
+            if filter_lang == "cql2-json":
+                try:
+                    filter_obj = orjson.loads(_filter)
+                except orjson.JSONDecodeError as e:
+                    raise HTTPException(status_code=400, detail=f"Invalid filter provided (cql2-json): {e}") from e
+            elif filter_lang == "cql2-text":
+                try:
+                    filter_obj = orjson.loads(to_cql2(parse_cql2_text(_filter)))
+                except Exception as e:
+                    raise HTTPException(status_code=400, detail=f"Invalid filter provided (cql2-text): {e}") from e
+            else:
+                raise HTTPException(status_code=400, detail=f"Unsupported filter language: {filter_lang}")
+        elif isinstance(_filter, dict):
+            filter_obj = _filter
+        else:
+            raise HTTPException(status_code=400, detail="Filter must be a string or dictionary")
+        
+        normalized_filter = filter_obj.get("filter", filter_obj)
+        return normalized_filter
 
 @attr.s
 class EsAsyncCollectionSearchClient(AsyncBaseCollectionSearchClient):
@@ -1508,6 +1554,11 @@ class EsAsyncCollectionSearchClient(AsyncBaseCollectionSearchClient):
 
         if search_request.limit:
             limit = search_request.limit
+        
+        _filter = getattr(search_request, "filter", None)
+        if _filter:
+            normalized_filter = EsAsyncBaseFiltersClient.decode_cql2_filter(_filter, getattr(search_request, "filter_lang", "cql2-json"))
+            search = self.database.apply_cql2_filter(search=search, _filter=normalized_filter)
 
         collections, maybe_count, next_token = await self.database.execute_collection_search(
             search=search,
