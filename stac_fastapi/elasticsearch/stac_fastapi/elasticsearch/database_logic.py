@@ -1064,7 +1064,7 @@ class DatabaseLogic:
                 raise HTTPException(status_code=401, detail="User is not authenticated")
             for workspace in workspaces:
                 if workspace == access_control.get("owner", ""):
-                    return item_id
+                    return item
             raise HTTPException(status_code=403, detail="User is not authorized to access this item")
 
         return item
