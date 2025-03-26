@@ -67,6 +67,7 @@ ES_ITEMS_SETTINGS = {
     "index": {
         "sort.field": list(DEFAULT_SORT.keys()),
         "sort.order": [v["order"] for v in DEFAULT_SORT.values()],
+        "mapping.total_fields.limit": 1000,  # Set the maximum number of fields to be indexed
     },
     "analysis": {
         "tokenizer": {
@@ -87,6 +88,9 @@ ES_ITEMS_SETTINGS = {
 }
 
 ES_COLLECTIONS_SETTINGS = {
+    "index": {
+        "mapping.total_fields.limit": 1100,  # Set the maximum number of fields to be indexed for collections and catalogs
+    },
     "analysis": {
         "tokenizer": {
             "edge_ngram_tokenizer": {
