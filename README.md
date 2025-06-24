@@ -1,3 +1,5 @@
+# Repository Archived - replaced by eodhp-stac-fastapi-elasticsearch-opensearch
+
 # stac-fastapi-elasticsearch-opensearch (sfeos)
 
 <!-- markdownlint-disable MD033 MD041 -->
